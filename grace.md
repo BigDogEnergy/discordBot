@@ -23,7 +23,7 @@ TL;DR Version below:
         - Each player can review their grace (and everyone elses) using the associated document
 3. Players acquire grace by donating epic (purple) items to the guild
     - If the player instead chooses to donate the item to the guild, they will receive 1 grace
-    - Players choosing to donate Weekly Boss items will receive 3 grace
+    - Players choosing to donate Weekly Arch Boss items will receive 3 grace
 4. Players can utilize their grace on donated items
     - If multiple players want an item, the player with more grace can use their amount to receive it first
 
@@ -45,16 +45,18 @@ TL;DR Version below:
 ## Proposed Solutions
 1. Loot will be set so that all items are now being sent to guild storage.
 2. World Bosses
-    - The user that receives a PEACE drop may request their item for whatever reason they want it for
-        - No grace is used
-        - The player may request their item using the standard channel
-        - No protests may be made from other players
-    - CONFLICT boss drops will be processed through the guild's grace system as they represent our collective effort.
-3. Arch Bosses
+    - PEACE
+        - A player may request the item they received due to their contribution roll for any reason
+            - The player will request their item using the standard channel
+            - No grace is used
+            - No protests may be made from other players. These are based on individual contribution.
+    - CONFLICT
+        - Drops will be processed through the guild's grace system as they represent our collective effort.
+3. Arch Bosses (PEACE & CONFLICT)
     - All items will be processed through our Grace system
         - This will ensure that players do not greed items that represent our collective effort.
         - When a player is awarded an Arch Boss item that was processed through the grace system
-            - They must immediately upgrade it to +1
+            - The player must immediately upgrade their new item to +1
                 - This process binds the item to the player.
                 - The item must then be linked into the guild chat. This acts as a display-of-good-faith.
 4. Internal Guild Item Gifting
@@ -64,3 +66,5 @@ TL;DR Version below:
 5. Roster-type Info Update
     - Players must now sign-up and state their preferred build(s)
     - Rolling for gear will be hierarchyed as follows: Main Spec -> Off Spec -> Greed
+6. Retroactive Grace for previous Arch Boss Weapons
+    - 3 Grace was determined to be too small a number. Players that previously donated will receive an additional 7, bringing their total to 10 grace for the weapons.

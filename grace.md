@@ -43,22 +43,23 @@ TL;DR Version below:
 
 
 ## Proposed Solutions
-1. World Bosses
-    - No changes are being suggested to the above system.
-        - Potential update consideration: All CONFLICT epic drops are placed into the guild chest for processing.
-            - These items from CONFLICT are a representation of our collective effort.
-2. Arch Bosses
-    - No claim period. 
-        - This means: A player may no longer greed items
-    - All items will be sent directly to the guild chest for processing
-        - All items will be processed through our Grace system to ensure that players do not greed items that represent our collective effort.
-        - A player that has won an Arch Boss item that was processed must immediately upgrade it to +1
-            - The item must then be linked into the guild chat.
-            - This process binds the item to the player and acts as a display-of-good-faith
-3. Internal Guild Item Gifting
+1. Loot will be set so that all items are now being sent to guild storage.
+2. World Bosses
+    - The user that receives a PEACE drop may request their item for whatever reason they want it for
+        - No grace is used
+        - The player may request their item using the standard channel
+        - No protests may be made from other players
+    - CONFLICT boss drops will be processed through the guild's grace system as they represent our collective effort.
+3. Arch Bosses
+    - All items will be processed through our Grace system to ensure that players do not greed items that represent our collective effort.
+    - When a player is awarded an Arch Boss item that was processed through the grace system
+        - They must immediately upgrade it to +1
+            - This process binds the item to the player.
+            - The item must then be linked into the guild chat. This acts as a display-of-good-faith.
+4. Internal Guild Item Gifting
     - If an item you have won (via grace usage or peaceful boss assignment) is in the guild chest, and you wish to send it to another player instead:
-        - The receiving player must have at least 10 grace
+        - The receiving player must have at least 10 or more grace
         - The receiving player will lose 10 of their grace
-4. Roster-type Changes
+5. Roster-type Changes
     - Players must now sign-up and state their preferred build(s)
     - Rolling for gear will be hierarchyed as follows: Main Spec -> Off Spec -> Greed

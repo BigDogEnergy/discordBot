@@ -31,7 +31,7 @@ TL;DR Version below:
 
 ## Current Problems
 1. A player does not need to donate an item that they are not using for their main spec(s)
-2. A player does not need to donate an arch boss weapon
+2. A player does not need to donate an arch boss weapon unrelated to their spec
 3. Players can circumvent or completely attempt to go around our system
     - Instance: In the past few weeks, players have chose to sell/keep an item for personal gain instead of helping the guild
         - In both of the recent instances, it was a conflict weapon (a collective effort)
@@ -51,15 +51,16 @@ TL;DR Version below:
         - No protests may be made from other players
     - CONFLICT boss drops will be processed through the guild's grace system as they represent our collective effort.
 3. Arch Bosses
-    - All items will be processed through our Grace system to ensure that players do not greed items that represent our collective effort.
-    - When a player is awarded an Arch Boss item that was processed through the grace system
-        - They must immediately upgrade it to +1
-            - This process binds the item to the player.
-            - The item must then be linked into the guild chat. This acts as a display-of-good-faith.
+    - All items will be processed through our Grace system
+        - This will ensure that players do not greed items that represent our collective effort.
+        - When a player is awarded an Arch Boss item that was processed through the grace system
+            - They must immediately upgrade it to +1
+                - This process binds the item to the player.
+                - The item must then be linked into the guild chat. This acts as a display-of-good-faith.
 4. Internal Guild Item Gifting
     - If an item you have won (via grace usage or peaceful boss assignment) is in the guild chest, and you wish to send it to another player instead:
         - The receiving player must have at least 10 or more grace
         - The receiving player will lose 10 of their grace
-5. Roster-type Changes
+5. Roster-type Info Update
     - Players must now sign-up and state their preferred build(s)
     - Rolling for gear will be hierarchyed as follows: Main Spec -> Off Spec -> Greed

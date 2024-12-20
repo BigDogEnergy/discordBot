@@ -1,0 +1,41 @@
+that let us vote on bosses and sign up for the event simultaneously while creating a Discord event would be awesome. 
+Additional features would be allowing me to confirm that those who signed up actually did automatically giving them a grace point. 
+I would like to be able to manually add grace points as well as any advisor having the same access. 
+There should be capes for it to store an archive or log or something timestamping the date and time the grace was given or ask 
+when the grace was earned. A list for everyone to see their grace compared to others as well as a command that allows 
+someone to see their own grace. Finally I would like the bot to keep a full guild roster as well as the ability to assign roles so that 
+if we make a sister guild I can disseminate who’s in what guild. Their gear score, equipment Bow/staff, GS Dagger etc.. 
+their play preference so PVP, PvE or Both This seems like a lot and I have no idea how hard or easy it would be to do all of 
+this so I will compensate you in your payment of preference as long as you tell me what you think it will cost. 
+
+Plan is for a bot that allows:
+
+Feature 1 - Player Related
+-Players can sign up
+-Players can identify themselves as a DPS / Healer / Tank.
+-Players will specify a weapon choice:
+---> Any combo of: Greatsword, Sword, Daggers, Longbow, Crossbows, Staff, Wand & Spear
+-Players can share their current gearscore
+-A combination of weapons and gearscore can be shown to other players. We will utilize this in other features
+
+Feature 2 - Calendar Related
+-Leads can create an event for the Discord
+--->Events can have additional voting options related to them
+-Players can sign up for the events
+--->Below each archetype (Healer/Tank/DPS): signed up Players name, weapon specifications, & gear score
+--->Players must vote on event at signup as part of process including (DPS/Heal/Tank & RSVP-related)
+
+Feature 2 specification -- Boss Related
+-Leads can create a discord calendar event (for upcoming bosses).
+-Players to request which boss they want to defeat for loot
+--->Choies of: Adentus, Ahzreil, Aridus, Chernobog, Cornelius, Excavator-9, Grand Aelon, Junobote, Kowazan, Malakar, Minezerok, Morokai, Nirma, & Talus
+--->Gear specific reasoning doesnt seem necessary
+
+Reference: Kastleton Janitor
+
+Feature 3 - Grace System
+-Must be able to read a google doc for initial setup of our point system
+-Must have an action receipt history available to all Players
+-Players can be assigned Grace (a point) whenever they are confirmed for an event they previously signed up for
+-Players can be assigned Grade for approved actions (donating an item for instance)
+--->Players can submit a Grace request.

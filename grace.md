@@ -45,13 +45,10 @@ TL;DR Version below:
 ## Proposed Solutions
 1. Loot will be set so that all items are now being sent to guild storage.
 2. World Bosses
-    - PEACE
-        - A player may request the item they received due to their contribution roll for any reason
-            - The player will request their item using the standard channel
-            - No grace is used
-            - No protests may be made from other players. These are based on individual contribution.
-    - CONFLICT
-        - Drops will be processed through the guild's grace system as they represent our collective effort.
+    - A player may request the item they were assigned
+        - The player will request their item using the standard channel
+        - No grace is used
+        - No protests may be made from other players.
 3. Arch Bosses (PEACE & CONFLICT)
     - All items will be processed through our Grace system
         - This will ensure that players do not greed items that represent our collective effort.

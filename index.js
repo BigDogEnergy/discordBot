@@ -1,23 +1,34 @@
 require('dotenv').config();
 
-// Access environment variables
+// Environment Variables and Setup
+
 const discordToken = process.env.DISCORD_BOT_TOKEN;
-const googleSheetsToken = process.env.GOOGLE_SHEETS_TOKEN;
-
-
+const googleSheetsKeyFile = process.env.GOOGLE_SHEETS_KEY_FILE;
 const { Client, GatewayIntentBits } = require('discord.js');
 const { google } = require('googleapis');
 const fs = require('fs');
 
+// Support Functions
+
+async function getSheetData(spreadsheetId, range) {
+  const authClient = await auth.getClient();
+  const sheets = google.sheets({ version: 'v4', auth: authClient });
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: spreadsheetId,
+    range: range,
+  });
+
+  return response.data.values; // -- This will return our data as a 2D array
+}
+
 // 1. Discord Bot Setup
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
-
-// Insert your bot token here
 const DISCORD_TOKEN = discordToken;
 
 // 2. Google Sheets Setup
 const auth = new google.auth.GoogleAuth({
-  keyFile: googleSheetsToken,
+  keyFile: googleSheetsKeyFile,
   scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
 });
 
@@ -28,14 +39,12 @@ client.on('ready', () => {
 });
 
 client.on('messageCreate', async (message) => {
-  // Simple command check. In practice, use a more robust command handler.
   if (message.author.bot) return;
 
   if (message.content === '!getdata') {
-    // Replace with your Spreadsheet ID (found in the sheet’s URL)
-    const SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID';
-    // Specify the range you want to read, e.g., "Sheet1!A1:C10"
-    const RANGE = 'Sheet1!A1:C10';
+    const SPREADSHEET_ID = '1pAcZtOQy07ZwdmfmDtjgzhR2dSl_3Xmlabmfstaza7wD';
+    const RANGE = 'Silver Eclipse';
+
 
     try {
       const data = await getSheetData(SPREADSHEET_ID, RANGE);

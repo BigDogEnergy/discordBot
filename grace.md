@@ -24,7 +24,8 @@ TL;DR Version below:
 3. Players acquire grace by donating epic (purple) items to the guild
     - If the player instead chooses to donate the item to the guild, they will receive 1 grace
     - Players choosing to donate Weekly Arch Boss items will receive 3 grace
-4. Players can utilize their grace on donated items
+4. Players can acquire grace by completing surveys/polls that are requested from leadership
+5. Players can utilize their grace on donated items
     - If multiple players want an item, the player with more grace can use their amount to receive it first
 
 

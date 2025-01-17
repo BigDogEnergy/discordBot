@@ -41,10 +41,17 @@ client.on('ready', () => {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  if (message.content === '!getdata') {
-    const SPREADSHEET_ID = '1pAcZtOQy07ZwdmfmDtjgzhR2dSl_3Xmlabmfstaza7wD';
-    const RANGE = 'Silver Eclipse';
+  if (message.content.startsWith('!balance')) {
+    const args = message.content.split(' ').slice(1);
+    const guildMemberName = args.join(' ').trim();
 
+    if (!guildMemberName) {
+      message.channel.send('Please provide a guild member name. Usage: `!balance <guild member name>`');
+      return;
+    }
+
+    const SPREADSHEET_ID = '1pAcZtOQy07ZwdmfmDtjgzhR2dSl_3Xmlabmfstaza7wD';
+    const RANGE = 'Silver Eclipse!A3:B';
 
     try {
       const data = await getSheetData(SPREADSHEET_ID, RANGE);
@@ -54,9 +61,15 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
-      // Format the data into a readable message
-      const formattedData = data.map(row => row.join(' | ')).join('\n');
-      message.channel.send('Here is the data from the sheet:\n```' + formattedData + '```');
+      // Find the guild member in the data
+      const memberData = data.find(row => row[1]?.toLowerCase() === guildMemberName.toLowerCase());
+
+      if (memberData) {
+        const balance = memberData[0]; // Balance is in column A (index 0)
+        message.channel.send(`The balance for **${guildMemberName}** is: **${balance} DKP**.`);
+      } else {
+        message.channel.send(`Guild member **${guildMemberName}** not found.`);
+      }
     } catch (error) {
       console.error('Error fetching data from Google Sheets:', error);
       message.channel.send('There was an error fetching the data. Check the logs.');

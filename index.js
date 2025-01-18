@@ -5,8 +5,128 @@ const discordToken = process.env.DISCORD_BOT_TOKEN;
 const googleSheetsKeyFile = process.env.GOOGLE_SHEETS_KEY_FILE;
 const spreadsheetId = process.env.SPREADSHEET_ID;
 
-const { Client, GatewayIntentBits } = require('discord.js');
+const { 
+  Client, 
+  GatewayIntentBits, 
+  ActionRowBuilder, 
+  ButtonBuilder, 
+  ButtonStyle, 
+  StringSelectMenuBuilder,
+  EmbedBuilder 
+} = require('discord.js');
+
 const { google } = require('googleapis');
+
+// Bosses Loot Tables
+
+const bossItems = {
+  "Adentus": [
+    "Adentus's Gargantuan Greatsword",
+    "Shadow Harvester Mask",
+    "Blessed Templar Helmet",
+    "Girdle of Spectral Skulls"
+  ],
+  "Ahzreil": [
+    "Ahzreil's Siphoning Sword",
+    "Swirling Essence Pants",
+    "Divine Justiciar Pants",
+    "Blessed Templar Cloak",
+    "Gilded Raven Trousers"
+  ],
+  "Aridus": [
+    "Aridus's Gnarled Voidstaff",
+    "Phantom Wolf Breeches",
+    "Breeches of the Executioner",
+    "Belt of Bloodlust",
+    "Gilded Raven Mask"
+  ],
+  "Chernobog": [
+    "Chernobog's Blade of Beheading",
+    "Helm of the Field General",
+    "Arcane Shadow Shoes",
+    "Bile Drenched Veil"
+  ],
+  "Cornelius": [
+    "Cornelius's Animated Edge",
+    "Ascended Guardian Hood",
+    "Divine Justiciar Attire",
+    "Abyssal Grace Charm"
+  ],
+  "Excavator-9": [
+    "Excavator's Mysterious Scepter",
+    "Heroic Breeches of the Resistance",
+    "Embossed Granite Band",
+  ],
+  "Grand Aelon": [
+    "Aelon's Rejuvenating Longbow",
+    "Greaves of the Field General",
+    "Arcane Shadow Pants",
+    "Wrapped Coin Necklace"
+  ],
+  "Junobote": [
+    "Junobote's Juggernaut Warblade",
+    "Arcane Shadow Robes",
+    "Shadow Harvester Trousers",
+    "Forsaken Embrace",
+    "Junobote's Smoldering Ranseur"
+  ],
+  "Kowazan": [
+    "Kowazan's Twilight Daggers",
+    "Kowazan's Sunflare Crossbows",
+    "Shock Commander Greaves",
+    "Collar of Decimation",
+    "Arcane Shadow Hat",
+  ],
+  "Malakar": [
+    "Malakar's Energizing Crossbows",
+    "Shock Commander Visor",
+    "Ebon Roar Gauntlets",
+    "Gilded Infernal Wristlet"
+  ],
+  "Minezerok": [
+    "Minzerok's Daggers of Crippling",
+    "Swirling Essence Hat",
+    "Divine Justiciar Gloves",
+    "Blessed Templar Choker"
+  ],
+  "Morokai": [
+    "Morokai's Greatblade of Corruption",
+    "Arcane Shadow Gloves",
+    "Abyssal Grace Pendant"
+  ],
+  "Nirma": [
+    "Nirma's Sword of Echoes",
+    "Ascended Guardian Pants",
+    "Divine Justiciar Shoes",
+    "Clasp of the Overlord"
+  ],
+  "Queen Bellandir": [
+    "Queen Bellandir's Languishing Blade",
+    "Queen Bellandir's Toxic Spine Throwers",
+    "Queen Bellandir's Hivemind Staff",
+    "Queen Bellandir's Serrated Spike",
+    "Sabatons of the Field General",
+    "Phantom Wolf Boots",
+    "Ascended Guardian Shoes",
+    "Band of Universal Power"
+  ],
+  "Talus": [
+    "Talus's Crystalline Staff",
+    "Phantom Wolf Mask",
+    "Blessed Templar Plate Mail",
+    "Forged Golden Bangle"
+  ],
+  "Tevent": [
+    "Tevent's Warblade of Despair",
+    "Tevent's Fangs of Fury",
+    "Tevent's Arc of Wailing Death",
+    "Tevent's Grasp of Withering",
+    "Shock Commander Gauntlets",
+    "Shadow Harvester Grips",
+    "Swirling Essence Gloves",
+    "Gilded Raven Grips"
+  ]
+};
 
 // Support Functions
     async function getSheetData(spreadsheetId, range) {

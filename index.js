@@ -142,6 +142,7 @@ const itemTraits = [
   "Magic Evasion",
   "Mana Regen",
   "Max Health",
+  "Max Mana",
   "Melee Endurance",
   "Melee Evasion",
   "Move Speed",
@@ -191,6 +192,10 @@ const itemTraits = [
       console.log(`Logged in as ${client.user.tag}!`);
     });
 
+//////////////////////////////////////////////////////////////
+//                      !gracelist
+//////////////////////////////////////////////////////////////
+
     // Message Event -- !gracelist Command (List all guild members & their balance)
     client.on('messageCreate', async (message) => {
       if (message.author.bot) return;
@@ -228,6 +233,10 @@ const itemTraits = [
         }
       }
     });
+
+//////////////////////////////////////////////////////////////
+//                      !balance
+//////////////////////////////////////////////////////////////
 
     // Message Event -- !balance Command (Check balance of a specific guild member)
     client.on('messageCreate', async (message) => {
@@ -272,6 +281,10 @@ const itemTraits = [
       }
     });    
     
+//////////////////////////////////////////////////////////////
+//                      !addgrace
+//////////////////////////////////////////////////////////////
+  
     // Message Event -- !addgrace Command (Add points to a specific guild member)
     client.on('messageCreate', async (message) => {
       if (message.author.bot) return;
@@ -346,217 +359,204 @@ const itemTraits = [
       }
     });
 
-    // Message Event -- !donate Command (Donate items to the guild bank)
-    client.on('messageCreate', async (message) => {
-      if (message.author.bot) return;
-    
-      // Register !donate in the messageCreate event
-      if (message.content.startsWith('!donate')) {
-        // Step 1: Provide a list of bosses
-        const bossOptions = Object.keys(bossItems).map((boss) => ({
-          label: boss,
-          value: boss,
-        }));
-    
-        const bossRow = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('select_boss')
-            .setPlaceholder('Select a boss...')
-            .addOptions(bossOptions)
-        );
-    
-        await message.channel.send({
-          content: 'Please select the boss from which the item dropped:',
-          components: [bossRow],
-        });
-      }
-    });    
-    
-    // Handle boss selection and subsequent menus
+//////////////////////////////////////////////////////////////
+//                      /donate
+//////////////////////////////////////////////////////////////
+
     client.on('interactionCreate', async (interaction) => {
-      if (!interaction.isStringSelectMenu()) return;
-    
-      // Boss selection -> Items
-      if (interaction.customId === 'select_boss') {
-        const selectedBoss = interaction.values[0];
-        const items = bossItems[selectedBoss] || [];
-    
-        // Provide a list of items
-        const itemOptions = items.map((item) => ({
-          label: item,
-          value: item,
-        }));
-    
-        const itemRow = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('select_item')
-            .setPlaceholder(`Select an item from ${selectedBoss}...`)
-            .addOptions(itemOptions)
-        );
-    
-        // Acknowledge boss selection
-        await interaction.deferUpdate();
-        await interaction.message.edit({
-          content: `You selected **${selectedBoss}**. Now, select the item:`,
-          components: [itemRow],
-        });
+      // We check if it's a slash command
+      if (interaction.isChatInputCommand()) {
+        if (interaction.commandName === 'donate') {
+          // Step 1: Show boss list (ephemeral)
+          const bossOptions = Object.keys(bossItems).map((boss) => ({
+            label: boss,
+            value: boss,
+          }));
+
+          const bossRow = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId('select_boss')
+              .setPlaceholder('Select a boss...')
+              .addOptions(bossOptions)
+          );
+
+          await interaction.reply({
+            content: 'Please select the boss from which the item dropped:',
+            components: [bossRow],
+            ephemeral: true,
+          });
+        }
       }
-    
-      // Item selection -> Traits
-      if (interaction.customId === 'select_item') {
-        const selectedItem = interaction.values[0];
-    
-        // Create a list of traits
-        const traitOptions = itemTraits.map((trait) => ({
-          label: trait,
-          value: trait,
-        }));
-    
-        const traitRow = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('select_trait')
-            .setPlaceholder(`Select a trait for ${selectedItem}...`)
-            .addOptions(traitOptions)
-        );
-    
-        // Acknowledge item selection
-        await interaction.deferUpdate();
-        await interaction.message.edit({
-          content: `You selected **${selectedItem}**. Now, select the item trait:`,
-          components: [traitRow],
-        });
+      // If it's not a slash command, check if it’s a select menu or button
+      else if (interaction.isStringSelectMenu()) {
+        // handle ephemeral steps for boss/item/trait
+        if (interaction.customId === 'select_boss') {
+          const selectedBoss = interaction.values[0];
+          const items = bossItems[selectedBoss] || [];
+
+          const itemOptions = items.map(item => ({ label: item, value: item }));
+          const itemRow = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId('select_item')
+              .setPlaceholder(`Select an item from ${selectedBoss}...`)
+              .addOptions(itemOptions)
+          );
+
+          await interaction.update({
+            content: `You selected **${selectedBoss}**. Now select an item:`,
+            components: [itemRow],
+          });
+        }
+        else if (interaction.customId === 'select_item') {
+          const selectedItem = interaction.values[0];
+
+          const traitOptions = itemTraits.map(trait => ({ label: trait, value: trait }));
+          const traitRow = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId('select_trait')
+              .setPlaceholder(`Select a trait for ${selectedItem}...`)
+              .addOptions(traitOptions)
+          );
+
+          await interaction.update({
+            content: `You selected **${selectedItem}**. Now select a trait:`,
+            components: [traitRow],
+          });
+        }
+        else if (interaction.customId === 'select_trait') {
+          // parse item from the ephemeral content
+          const matchedItem = interaction.message.content.match(/You selected \*\*(.*)\*\*/);
+          const selectedItem = matchedItem ? matchedItem[1] : 'UnknownItem';
+
+          const selectedTrait = interaction.values[0];
+
+          // create the thread publicly
+          const targetChannel = interaction.guild.channels.cache.find(
+            (ch) => ch.name === '🎰⥐guild-chest-requests'
+          );
+          if (!targetChannel) {
+            await interaction.update({
+              content: 'Target channel not found. Please notify an admin.',
+              components: [],
+            });
+            return;
+          }
+
+          const threadName = `${selectedItem} (${selectedTrait})`;
+          const thread = await targetChannel.threads.create({
+            name: threadName,
+            reason: 'Grace Request',
+          });
+
+          // donor is who initiated the menu steps
+          const donorName = interaction.member?.displayName || interaction.user.username;
+
+          // build the approve/deny buttons
+          const actionRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId('approve_donation')
+              .setLabel('Approve')
+              .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+              .setCustomId('deny_donation')
+              .setLabel('Deny')
+              .setStyle(ButtonStyle.Danger)
+          );
+
+          await thread.send({
+            content: `Donated by: **${donorName}**\nItem: **${selectedItem}**\nTrait: **${selectedTrait}**\n<@&1293318534142623775>`,
+            components: [actionRow],
+          });
+
+          // ephemeral final step
+          await interaction.update({
+            content: `Your donation request for **${selectedItem}** with trait **${selectedTrait}** has been submitted for approval in ${thread.toString()}.`,
+            components: [],
+          });
+        }
       }
-    
-      // Trait selection -> Create thread
-      if (interaction.customId === 'select_trait') {
-        const selectedTrait = interaction.values[0];
-        // We parse the content to find the item from the message
-        const matchedItem = interaction.message.content.match(/You selected \*\*(.*)\*\*/);
-        const selectedItem = matchedItem ? matchedItem[1] : 'UnknownItem';
-    
-        // Find target channel
-        const targetChannel = interaction.guild.channels.cache.find(
-          (channel) => channel.name === '🎰⥐guild-chest-requests'
-        );
-        if (!targetChannel) {
-          await interaction.reply('Target channel not found. Please notify an admin.');
+      else if (interaction.isButton()) {
+        // button logic for approve / deny
+        // Ensure role
+        const memberRoles = interaction.member.roles.cache;
+        if (!memberRoles.some(role => role.name === 'Silver Eclipse Leader')) {
+          await interaction.reply({ content: 'You do not have permission to use this button.', ephemeral: true });
           return;
         }
-      
-        // Step 3: Create a thread in the target channel
-        const thread = await targetChannel.threads.create({
-          name: `${selectedItem} (${selectedTrait})`,
-          reason: 'Grace Request',
-        });
-      
-        // Get user’s displayName or fallback
-        const userDisplayName = interaction.member?.displayName
-      
-        const actionRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId('approve_donation')
-            .setLabel('Approve')
-            .setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId('deny_donation')
-            .setLabel('Deny')
-            .setStyle(ButtonStyle.Danger)
-        );
-      
-        await thread.send({
-          content: `\nDonated by: **${userDisplayName}**\nItem: **${selectedItem}**\nTrait: **${selectedTrait}**`,
-          components: [actionRow],
-        });
-      
-        // Delete the original message from the channel
-        await interaction.deferUpdate(); // Acknowledge the select menu interaction
-        await interaction.message.delete().catch(console.error);
-      
-        // Send ephemeral confirmation
-        await interaction.followUp({
-          content: `Your Grace request for **${selectedItem}** with trait **${selectedTrait}** has been submitted for approval.`,
-          ephemeral: true,
-        });
-      }
-    });
-    
-    // Handle approve/deny actions
-    client.on('interactionCreate', async (interaction) => {
-      if (!interaction.isButton()) return;
 
-      // Verify the user has the required role
-      const memberRoles = interaction.member.roles.cache;
-      if (!memberRoles.some((role) => role.name === 'Silver Eclipse Leader')) {
-        await interaction.reply({ content: 'You do not have permission to use this button.', ephemeral: true });
-        return;
-      }
+        // parse the donor from "Donated by: **someName**"
+        const donorMatch = interaction.message.content.match(/Donated by: \**([\w]+)\**/);
+        const donorName = donorMatch ? donorMatch[1] : null;
+        // console.log("This is our donorName", donorName);
 
-      // Get the user's name from the message content
-      const userDisplayName = interaction.member?.displayName
+        if (!donorName) {
+          await interaction.reply({ content: 'Unable to determine the donor.', ephemeral: true });
+          return;
+        }
 
-      // Get the current data from the sheet
-      const RANGE = 'Balance!A2:B71';
-      try {
-        const data = await getSheetData(spreadsheetId, RANGE);
-        const rowIndex = data.findIndex((row) => row[0]?.toLowerCase() === userDisplayName.toLowerCase());
+        // fetch sheet data to update DKP
+        let data;
+        try {
+          data = await getSheetData(spreadsheetId, 'Balance!A2:B71');
+        } catch (err) {
+          console.error('Error fetching data:', err);
+          await interaction.reply({ content: 'Error fetching data. Check logs.', ephemeral: true });
+          return;
+        }
 
+        const rowIndex = data.findIndex(row => row[0]?.toLowerCase() === donorName.toLowerCase());
         if (rowIndex === -1) {
-          await interaction.reply('User not found in the balance sheet.');
+          await interaction.reply({ content: `User **${donorName}** not found in the balance sheet.`, ephemeral: true });
           return;
         }
 
-        // Parse the current balance
         const currentBalance = parseInt(data[rowIndex][1], 10) || 0;
-        let newBalance = currentBalance; // default if deny
+        let newBalance = currentBalance;
 
+        // approve
         if (interaction.customId === 'approve_donation') {
-          // Approve logic
-          newBalance = currentBalance + 1000; // or however much you're awarding
-          const authClient = await auth.getClient();
-          const sheets = google.sheets({ version: 'v4', auth: authClient });
-        
-          const updateRange = `Balance!B${rowIndex + 2}`;
-          await sheets.spreadsheets.values.update({
-            spreadsheetId,
-            range: updateRange,
-            valueInputOption: 'USER_ENTERED',
-            resource: { values: [[newBalance]] },
-          });
-        
-          // Who clicked the approve button
-          const approverName = interaction.member?.displayName || interaction.user.username;
-        
-          // Acknowledge the interaction first
+          newBalance += 1000; // or your chosen DKP
+
+          // update
+          try {
+            const authClient = await auth.getClient();
+            const sheets = google.sheets({ version: 'v4', auth: authClient });
+            await sheets.spreadsheets.values.update({
+              spreadsheetId,
+              range: `Balance!B${rowIndex + 2}`,
+              valueInputOption: 'USER_ENTERED',
+              resource: { values: [[newBalance]] },
+            });
+          } catch (err) {
+            console.error('Error updating balance:', err);
+            await interaction.reply({ content: 'Error updating balance. Check logs.', ephemeral: true });
+            return;
+          }
+
+          // remove buttons
           await interaction.deferUpdate();
-        
-          // Remove the buttons so no one else can click again
-          await interaction.message.edit({
-            components: [],
-          });
-        
-          // Post a new message in the thread with the approval
-          await interaction.channel.send(
-            `Donation approved by **${approverName}**. **${userDisplayName}** now has **${newBalance} DKP**.`
-          );
-        } else if (interaction.customId === 'deny_donation') {
-          // Deny logic (no change to DKP)
+          await interaction.message.edit({ components: [] });
+
           const approverName = interaction.member?.displayName || interaction.user.username;
-        
-          await interaction.deferUpdate();
-          await interaction.message.edit({
-            components: [],
-          });
-        
-          // Post denial message in the thread
           await interaction.channel.send(
-            `Donation request denied by **${approverName}**. **${userDisplayName}** still has **${currentBalance} DKP**.`
+            `Donation approved by **${approverName}**. **${donorName}** now has **${newBalance} DKP**.`
           );
-        }        
-      } catch (error) {
-        console.error('Error updating balance:', error.message);
-        await interaction.reply('Error updating Grace. Check the logs.');
+        }
+        // deny
+        else if (interaction.customId === 'deny_donation') {
+          await interaction.deferUpdate();
+          await interaction.message.edit({ components: [] });
+
+          const approverName = interaction.member?.displayName || interaction.user.username;
+          await interaction.channel.send(
+            `Donation request denied by **${approverName}**. **${donorName}** still has **${currentBalance} DKP**.`
+          );
+        }
       }
     });
+    
+    
+
 
 
 // 4. Login the bot

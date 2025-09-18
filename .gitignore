@@ -5,3 +5,9 @@
 node_modules/
 *.json
 utility-binder-445307-t9-bb22f5e575ab.json
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/

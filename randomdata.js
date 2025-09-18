@@ -1,0 +1,8 @@
+let arr1 = ['Ascended Chernobog' 'Ascended Chernobog', 'Ascended Adentus', 'Ascended Adentus', 'Ascended Ahzreil', 'Ascended Ahzreil', 'Ascended Aridus', 'Ascended Aridus', 'Ascended Nirma', 'Ascended Nirma', 'Ascended Morokai', 'Ascended Morokai', 'Ascended Malakar', 'Ascended Malakar', 'Ascended Excavator-9', 'Ascended Excavator-9', 'Ascended Talus', 'Ascended Talus', 'Ascended Junobote', 'Ascended Junobote', 'Ascended Minezerok', 'Ascended Minezerok', 'Ascended Minezerok', 'Ascended Minezerok', 'Ascended Cornelius', 'Ascended Cornelius', 'Ascended Lycan Kowazan', 'Ascended Lycan Kowazan', 'Ascended Kowazan', 'Ascended Kowazan', 'Ascended Grand Aelon', 'Ascended Grand Aelon', 'Ascended Grand Aelon', 'Ascended Grand Aelon', 'Ascended Chernobog', 'Ascended Adentus', 'Ascended Ahzreil', 'Ascended Morokai']
+let arr2 = ['Ascended Malakar', 'Ascended Excavator-9', 'Ascended Talus', 'Ascended Junobote', 'Ascended Lycan Kowazan', 'Ascended Kowazan', 'Ascended Grand Aelon', 'Ascended Grand Aelon', 'Ascended Chernobog', 'Ascended Adentus', 'Ascended Ahzreil', 'Ascended Aridus', 'Ascended Nirma', 'Ascended Morokai', 'Ascended Malakar', 'Ascended Excavator-9', 'Ascended Talus', 'Ascended Junobote', 'Ascended Minezerok', 'Ascended Minezerok', 'Ascended Cornelius', 'Ascended Kowazan', 'Ascended Grand Aelon', 'Ascended Grand Aelon', 'Ascended Chernobog', 'Ascended Adentus', 'Ascended Ahzreil', 'Ascended Morokai', 'Ascended Malakar', 'Ascended Excavator-9', 'Ascended Talus', 'Ascended Junobote', 'Ascended Lycan Kowazan', 'Ascended Kowazan', 'Ascended Grand Aelon', 'Ascended Grand Aelon', 'Nerzatum', 'Nerzatum']
+
+let combined = [...arr1, ...arr2];
+let unique = [...new Set(combined)];
+
+console.log(unique)
+

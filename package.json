@@ -2,6 +2,12 @@
   "dependencies": {
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.7",
-    "googleapis": "^144.0.0"
-  }
+    "googleapis": "^144.0.0",
+    "playwright": "^1.50.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.1",
+    "@types/node": "^22.13.5"
+  },
+  "scripts": {}
 }

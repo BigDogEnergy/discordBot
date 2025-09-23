@@ -1,48 +1,16 @@
-// Discord Loot Poll Bot — Throne & Liberty (Google Sheets + Categories + Presets + Vote Limits)
-// ------------------------------------------------------------------------------------
-// NEW in this version
-// - Presets: preload items per boss from a "Presets" sheet (supports all T3 World Bosses & Archbosses)
-// - Slots: armor/accessory items can specify a slot (helmet, chest, cloak, gloves, pants, boots, accessory)
-// - Vote limits:
-//    • Main PvP weapons: max 2 votes per user
-//    • Main PvE weapons: max 2 votes per user
-//    • Main PvP armor slots (helmet, chest, cloak, gloves, pants, boots): max 1 vote per slot per user
-//    • Accessory: max 1 vote (any accessory) per user
-// - New command: /poll preset boss:<name> type:<world_boss|archboss> mode:<main_pvp|main_pve|offspec>
-//   -> Creates a poll and auto-loads its items (Weapon/Armor/Accessory + optional slot) from Presets.
-//
-// Google Sheet tabs structure (add this 4th tab):
-//   • Polls: id, guild_id, name, is_open, expires_at, type, mode
-//   • Items: id, poll_id, name, name_lc, category, slot
-//   • Votes: poll_id, item_id, user_id
-//   • Presets: boss, type, item, category, slot   (type: world_boss|archboss; category: weapon|armor|accessory; slot optional)
-//     Example rows:
-//       Kazar,world_boss,Stormbreaker Halberd,weapon,
-//       Kazar,world_boss,Warlord’s Mail,armor,chest
-//       Kazar,world_boss,Amber Signet,accessory,accessory
-//
-// NOTE: You can bulk-maintain the Presets tab (CSV paste) so we don’t hardcode loot tables.
-
 import 'dotenv/config'
 import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  Client,
-  Events,
-  GatewayIntentBits,
-  Partials,
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  PermissionFlagsBits,
-  EmbedBuilder,
-  InteractionType,
-  ChannelType,
-  StringSelectMenuBuilder,
-  StringSelectMenuOptionBuilder,   
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events,
+  GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder,
+  PermissionFlagsBits, EmbedBuilder, InteractionType, ChannelType,
+  StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
+  MessageFlags,                         
 } from 'discord.js'
-import { google } from 'googleapis'
+import * as pollsRepo from './src/data/pollsRepo.js'
+import * as itemsRepo from './src/data/itemsRepo.js'
+import * as votesRepo from './src/data/votesRepo.js'
+import { sheets, readSheet, appendRows, overwriteRows, idxMap } from './src/infra/sheets.js'
+
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('[unhandledRejection]', reason);
@@ -90,14 +58,6 @@ if (!TOKEN || !CLIENT_ID || !SPREADSHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_P
   console.error('Missing required env vars: TOKEN, CLIENT_ID, SPREADSHEET_ID, GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY')
   process.exit(1)
 }
-
-// ---------- Google Sheets Client ----------
-const auth = new google.auth.JWT({
-  email: GOOGLE_CLIENT_EMAIL,
-  key: GOOGLE_PRIVATE_KEY,
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-})
-const sheets = google.sheets({ version: 'v4', auth })
 
 // Sheet names
 const SHEET_POLLS = 'Polls'
@@ -149,51 +109,6 @@ async function ensureHeaders() {
       })
     }
   }
-}
-
-
-function idxMap(header) {
-  const m = new Map()
-  header.forEach((h,i)=>m.set(h,i))
-  return m
-}
-
-async function readSheet(tab) {
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `${tab}!A:Z` })
-  const values = res.data.values || []
-  if (values.length === 0) return { header: [], rows: [] }
-  const header = values[0]
-  const rows = values.slice(1)
-  return { header, rows }
-}
-
-async function appendRows(tab, rows) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${tab}!A:Z`,
-    valueInputOption: 'RAW',
-    insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: rows },
-  })
-}
-
-async function overwriteRows(tab, header, rows) {
-  const width = header.length
-  const endCol = String.fromCharCode(64 + width)
-
-  // Clear previous data rows so no stale rows linger
-  await sheets.spreadsheets.values.clear({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${tab}!A2:Z`,
-  })
-
-  // Now write fresh header + rows
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${tab}!A1:${endCol}${rows.length + 1}`,
-    valueInputOption: 'RAW',
-    requestBody: { values: [header, ...rows] },
-  })
 }
 
 
@@ -257,117 +172,8 @@ async function nextId(tab) {
   return max + 1
 }
 
-async function createPoll({ guild_id, name, expires_at=null, type, mode }) {
-  const id = await nextId(SHEET_POLLS)
-  await appendRows(SHEET_POLLS, [[String(id), guild_id, name, '1', expires_at?String(expires_at):'', type, mode]])
-  return { id, guild_id, name, is_open:1, expires_at, type, mode }
-}
-
-async function listPolls(guild_id) {
-  const { header, rows } = await readSheet(SHEET_POLLS)
-  const m = idxMap(header)
-  return rows
-    .filter(r => r[m.get('guild_id')] === guild_id)
-    .map(r => ({
-      id: parseInt(r[m.get('id')],10),
-      guild_id: r[m.get('guild_id')],
-      name: r[m.get('name')],
-      is_open: parseInt(r[m.get('is_open')]||'0',10),
-      expires_at: r[m.get('expires_at')]? parseInt(r[m.get('expires_at')],10): null,
-      type: r[m.get('type')],
-      mode: r[m.get('mode')],
-    }))
-    .sort((a,b)=>b.id-a.id)
-}
-
-async function getPollById(id) {
-  const { header, rows } = await readSheet(SHEET_POLLS)
-  const m = idxMap(header)
-  for (const r of rows) {
-    if (parseInt(r[m.get('id')],10) === Number(id)) {
-      return {
-        id: Number(id),
-        guild_id: r[m.get('guild_id')],
-        name: r[m.get('name')],
-        is_open: parseInt(r[m.get('is_open')]||'0',10),
-        expires_at: r[m.get('expires_at')]? parseInt(r[m.get('expires_at')],10): null,
-        type: r[m.get('type')],
-        mode: r[m.get('mode')],
-      }
-    }
-  }
-  return null
-}
-
-async function getPollByName(guild_id, name) {
-  const all = await listPolls(guild_id)
-  return all.find(p => p.name.toLowerCase() === name.toLowerCase()) || null
-}
-
-async function setPollClosed(id) {
-  const { header, rows } = await readSheet(SHEET_POLLS)
-  const m = idxMap(header)
-  for (const r of rows) {
-    if (parseInt(r[m.get('id')],10) === Number(id)) {
-      r[m.get('is_open')] = '0'
-      break
-    }
-  }
-  await overwriteRows(SHEET_POLLS, header, rows)
-}
-
-async function voteWithMode(poll_id, item_id, user_id, user_name='', mode) {
-  const vs = await readSheet(SHEET_VOTES)
-  const m = idxMap(vs.header)
-
-  // Build a row aligned to current header
-  const row = new Array(vs.header.length).fill('')
-  row[m.get('poll_id')] = String(poll_id)
-  row[m.get('item_id')] = String(item_id)
-  row[m.get('user_id')] = user_id
-  if (m.has('user_name'))  row[m.get('user_name')]  = user_name || ''
-  if (m.has('mode'))       row[m.get('mode')]       = mode
-  if (m.has('created_at')) row[m.get('created_at')] = String(Date.now())
-
-  // De-dupe: same poll+item+user+mode
-  const exists = vs.rows.some(r =>
-    parseInt(r[m.get('poll_id')],10) === Number(poll_id) &&
-    parseInt(r[m.get('item_id')],10) === Number(item_id) &&
-    r[m.get('user_id')] === user_id &&
-    (!m.has('mode') || r[m.get('mode')] === mode)
-  )
-  if (!exists) await appendRows(SHEET_VOTES, [row])
-}
-
-async function removeVoteForUserItemMode(poll_id, item_id, user_id, mode) {
-  const vs = await readSheet(SHEET_VOTES)
-  const m = idxMap(vs.header)
-  const before = vs.rows.length
-  const rows = vs.rows.filter(r => !(
-    parseInt(r[m.get('poll_id')],10) === Number(poll_id) &&
-    parseInt(r[m.get('item_id')],10) === Number(item_id) &&
-    r[m.get('user_id')] === user_id &&
-    (!m.has('mode') || r[m.get('mode')] === mode)
-  ))
-  if (rows.length !== before) await overwriteRows(SHEET_VOTES, vs.header, rows)
-  return before - rows.length
-}
-
-async function removeVoteForUserItemAllModes(poll_id, item_id, user_id) {
-  const vs = await readSheet(SHEET_VOTES)
-  const m = idxMap(vs.header)
-  const before = vs.rows.length
-  const rows = vs.rows.filter(r => !(
-    parseInt(r[m.get('poll_id')],10) === Number(poll_id) &&
-    parseInt(r[m.get('item_id')],10) === Number(item_id) &&
-    r[m.get('user_id')] === user_id
-  ))
-  if (rows.length !== before) await overwriteRows(SHEET_VOTES, vs.header, rows)
-  return before - rows.length
-}
-
 async function getUserVotesAcrossGuildByMode(guild_id, user_id, mode, { onlyOpen = true } = {}) {
-  const polls = await listPolls(guild_id)
+  const polls = await pollsRepo.listPolls(guild_id)
   const scope = polls.filter(p => !onlyOpen || p.is_open)
   const votes = await readSheet(SHEET_VOTES)
   const vm = idxMap(votes.header)
@@ -380,7 +186,7 @@ async function getUserVotesAcrossGuildByMode(guild_id, user_id, mode, { onlyOpen
       (!vm.has('mode') || r[vm.get('mode')] === mode)
     )
     if (!mine.length) continue
-    const items = await getItems(p.id)
+    const items = await itemsRepo.getItems(p.id)
     const itemMap = new Map(items.map(i => [i.id, i]))
     for (const r of mine) {
       const itemId = parseInt(r[vm.get('item_id')],10)
@@ -410,12 +216,6 @@ async function wipePoll(id) {
   await overwriteRows(SHEET_VOTES, vr.header, vr.rows)
 }
 
-async function upsertItem(poll_id, name, category, slot='') {
-  const id = await nextId(SHEET_ITEMS)
-  await appendRows(SHEET_ITEMS, [[String(id), String(poll_id), name, name.toLowerCase(), category, slot]])
-  return { id, poll_id, name, name_lc: name.toLowerCase(), category, slot }
-}
-
 async function getItems(poll_id) {
   const { header, rows } = await readSheet(SHEET_ITEMS)
   const m = idxMap(header)
@@ -430,12 +230,6 @@ async function getItems(poll_id) {
       slot: r[m.get('slot')]||'',
     }))
     .sort((a,b)=> a.name.localeCompare(b.name))
-}
-
-async function getItemByName(poll_id, itemName) {
-  const items = await getItems(poll_id)
-  const lc = itemName.toLowerCase()
-  return items.find(i => i.name_lc === lc) || null
 }
 
 async function vote(poll_id, item_id, user_id, user_name= '') {
@@ -456,46 +250,11 @@ async function unvote(poll_id, item_id, user_id) {
   if (newRows.length !== rows.length) await overwriteRows(SHEET_VOTES, header, newRows)
 }
 
-async function clearVotesForUser(poll_id, user_id) {
-  const { header, rows } = await readSheet(SHEET_VOTES)
-  const m = idxMap(header)
-  const newRows = rows.filter(r => !(parseInt(r[m.get('poll_id')],10)===Number(poll_id) && r[m.get('user_id')]===(user_id)))
-  const removed = rows.length - newRows.length
-  if (removed) await overwriteRows(SHEET_VOTES, header, newRows)
-  return removed
-}
-
-async function removeVoteForUserItem(poll_id, item_id, user_id) {
-  const { header, rows } = await readSheet(SHEET_VOTES)
-  const m = idxMap(header)
-  const newRows = rows.filter(r => !(parseInt(r[m.get('poll_id')],10)===Number(poll_id) && parseInt(r[m.get('item_id')],10)===Number(item_id) && r[m.get('user_id')]===(user_id)))
-  const removed = rows.length - newRows.length
-  if (removed) await overwriteRows(SHEET_VOTES, header, newRows)
-  return removed
-}
-
-async function countVotesForItem(poll_id, item_id) {
-  const { header, rows } = await readSheet(SHEET_VOTES)
-  const m = idxMap(header)
-  return rows.filter(r => parseInt(r[m.get('poll_id')],10)===Number(poll_id) && parseInt(r[m.get('item_id')],10)===Number(item_id)).length
-}
-
-async function votersForItem(poll_id, item_id) {
-  const { header, rows } = await readSheet(SHEET_VOTES)
-  const m = idxMap(header)
-  return rows
-   .filter(r => parseInt(r[m.get('poll_id')],10)===Number(poll_id) && parseInt(r[m.get('item_id')],10)===Number(item_id))
-   .map(r => ({
-     id: r[m.get('user_id')],
-     name: m.has('user_name') ? (r[m.get('user_name')] || '') : ''
-   }))
-}
-
 async function getUserVotesDetailed(poll_id, user_id) {
   const votes = await readSheet(SHEET_VOTES)
   const vm = idxMap(votes.header)
   const mine = votes.rows.filter(r => parseInt(r[vm.get('poll_id')],10)===Number(poll_id) && r[vm.get('user_id')] === user_id)
-  const items = await getItems(poll_id)
+  const items = await itemsRepo.getItems(poll_id)
   const itemMap = new Map(items.map(i=>[i.id, i]))
   return mine.map(r => ({
     item_id: parseInt(r[vm.get('item_id')],10),
@@ -527,7 +286,7 @@ function normalizeSlotForLimits(s) {
   return v
 }
 
-function labelModeLong(m){ return m==='main_pve' ? 'Main PvE' : m==='offspec' ? 'Off‑spec' : 'Main PvP' }
+function labelMode(m){ return m==='main_pve' ? 'Main PvE' : m==='offspec' ? 'Off‑spec' : 'Main PvP' }
 
 async function checkVoteAllowedByMode(poll, user_id, item, voteMode) {
   const mine = await getUserVotesAcrossGuildByMode(poll.guild_id, user_id, voteMode, { onlyOpen: true })
@@ -646,10 +405,10 @@ function isAdmin(member) {
 async function resolvePoll(guildId, idOrName) {
   const byId = Number(idOrName)
   if (!Number.isNaN(byId)) {
-    const p = await getPollById(byId)
+    const p = await pollsRepo.getPollById(byId)
     if (p && p.guild_id === guildId) return p
   }
-  return await getPollByName(guildId, idOrName)
+  return pollsRepo.getPollByName(guildId, idOrName)
 }
 
 function pollEmbed(poll, items) {
@@ -669,8 +428,6 @@ function pollEmbed(poll, items) {
     .setFooter({ text: `Poll ID: ${poll.id}` })
 }
 
-
-function labelMode(m){ return m==='main_pve' ? 'Main PvE' : m==='offspec' ? 'offspec' : 'Main PvP' }
 function labelCat(c){ return c==='weapon' ? 'Weapons' : c==='armor' ? 'Armor' : 'Accessories' }
 function chunk(arr, n){ const out=[]; for(let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out }
 
@@ -701,8 +458,8 @@ function buildButtons(items, poll) {
 
 
 async function upsertPollMessage(channel, poll) {
-  const items = await getItems(poll.id)
-  for (const it of items) it._count = await countVotesForItem(poll.id, it.id)
+  const items = await itemsRepo.getItems(poll.id)
+  for (const it of items) it._count = await votesRepo.countVotesForItem(poll.id, it.id)
   const embed = pollEmbed(poll, items)
   const components = buildButtons(items, poll)
   const msgs = await channel.messages.fetch({ limit: 50 }).catch(()=>null)
@@ -921,7 +678,7 @@ async function tallyPollVotes(pollId) {
 }
 
 async function buildResultsEmbed(poll, { includeVoters = false, voterLimit = 10, hideZero = false } = {}) {
-  const items = await getItems(poll.id)
+  const items = await itemsRepo.getItems(poll.id)
   const { counts, votersMap, total } = await tallyPollVotes(poll.id)
 
   // decorate
@@ -986,37 +743,16 @@ function itemLabel(i) {
   return `${i.name}${i.slot ? ` (${i.slot})` : ''}`
 }
 
-async function clearVotesForItem(poll_id, item_id) {
-  const { header, rows } = await readSheet(SHEET_VOTES)
-  const m = idxMap(header)
-  const newRows = rows.filter(r =>
-    !(parseInt(r[m.get('poll_id')],10)===Number(poll_id) &&
-      parseInt(r[m.get('item_id')],10)===Number(item_id))
-  )
-  const removed = rows.length - newRows.length
-  if (removed) await overwriteRows(SHEET_VOTES, header, newRows)
-  return removed
-}
-
-async function clearAllVotesInPoll(poll_id) {
-  const { header, rows } = await readSheet(SHEET_VOTES)
-  const m = idxMap(header)
-  const newRows = rows.filter(r => parseInt(r[m.get('poll_id')],10) !== Number(poll_id))
-  const removed = rows.length - newRows.length
-  if (removed) await overwriteRows(SHEET_VOTES, header, newRows)
-  return removed
-}
-
 async function aggregateVotesAcrossGuildForItemByMode(guild_id, item_name_lc, mode) {
-  const polls = await listPolls(guild_id)
+  const polls = await pollsRepo.listPolls(guild_id)
   const scope = polls.filter(p => p.mode === mode) // include open & closed
   const out = []
 
   for (const p of scope) {
-    const items = await getItems(p.id)
+    const items = await itemsRepo.getItems(p.id)
     const it = items.find(x => (x.name_lc || x.name?.toLowerCase()) === item_name_lc)
     if (!it) continue
-    const voters = await votersForItem(p.id, it.id) // [{id,name}]
+    const voters = await votesRepo.votersForItem(p.id, it.id) // [{id,name}]
     if (voters.length) out.push({ poll: p, item: it, voters })
   }
   return out
@@ -1084,13 +820,19 @@ const commands = [
         {name:'Accessory', value:'accessory'},
       ).setRequired(true))
       .addStringOption(o=>o.setName('slot').setDescription('Slot (armor/accessory)').addChoices(
+        // Armor
         {name:'Helmet', value:'helmet'},
         {name:'Chest', value:'chest'},
         {name:'Cloak', value:'cloak'},
         {name:'Gloves', value:'gloves'},
         {name:'Pants', value:'pants'},
         {name:'Boots', value:'boots'},
-        {name:'Accessory', value:'accessory'},
+        // Accessory
+        {name:'Ring', value:'ring'},
+        {name:'Necklace', value:'neck'},
+        {name:'Earring', value:'earring'},
+        {name:'Bracelet', value:'bracelet'},
+        {name:'Belt', value:'belt'}
       ))
     )
     .addSubcommand(sc=> sc.setName('preset').setDescription('Create a poll from a boss preset (loads items from sheet)')
@@ -1225,14 +967,14 @@ async function checkExpirations() {
     if (isOpen && exp && exp < now) toClose.push(parseInt(r[m.get('id')],10))
   })
   for (const id of toClose) {
-    await setPollClosed(id)
+    await pollsRepo.setPollClosed(id)
     for (const [, guild] of client.guilds.cache) {
-      const poll = await getPollById(id)
+      const poll = await pollsRepo.getPollById(id)
       if (!poll) continue
       const channel = getPollChannel(guild)
       if (channel && guild.id === poll.guild_id) {
-        const items = await getItems(poll.id)
-        for (const it of items) it._count = await countVotesForItem(poll.id, it.id)
+        const items = await itemsRepo.getItems(poll.id)
+        for (const it of items) it._count = await votesRepo.countVotesForItem(poll.id, it.id)
         await channel.send({ content: `Poll **${poll.name}** expired.`, embeds:[pollEmbed(poll, items)] })
       }
     }
@@ -1276,7 +1018,7 @@ try {
 
   } catch (e) {
     console.error('Interaction error', e)
-    const msg = { content: 'Something went wrong. Try again.', ephemeral: true }
+    const msg = { content: 'Something went wrong. Try again.', flags: MessageFlags.Ephemeral }
     if (interaction.deferred || interaction.replied) await interaction.followUp(msg).catch(()=>null)
     else await interaction.reply(msg).catch(()=>null)
   }
@@ -1288,7 +1030,7 @@ async function handleCouncil(inter) {
   if (sub === 'create') {
     // Only leadership creates
     if (!isAdmin(inter.member) && !isCouncil(inter.member)) {
-      return inter.reply({ content: 'Leadership only.', ephemeral: true })
+      return inter.reply({ content: 'Leadership only.', flags: MessageFlags.Ephemeral })
     }
 
     const item = inter.options.getString('item', true).trim()
@@ -1299,7 +1041,7 @@ async function handleCouncil(inter) {
     // Build candidates from main votes
     const candidates = await getCandidatesFromMainVotes(inter.guildId, item.toLowerCase(), [mode])
     if (!candidates.length && !noAward) {
-      return inter.reply({ content: `No candidates found for **${item}** from ${mode==='both'?'Main PvP + Main PvE':labelMode(mode)} votes.`, ephemeral: true })
+      return inter.reply({ content: `No candidates found for **${item}** from ${mode==='both'?'Main PvP + Main PvE':labelMode(mode)} votes.`, flags: MessageFlags.Ephemeral })
     }
     // Include "No award" synthetic candidate if requested (uses pseudo-user id "no_award")
     if (noAward) candidates.push({ id: 'no_award', name: 'No award' })
@@ -1329,16 +1071,16 @@ async function handleCouncil(inter) {
     const components = councilButtons(poll, candRows, true)
 
     await postChannel.send({ embeds:[embed], components })
-    return inter.reply({ content:`Council poll created for **${item}** in ${postChannel}.`, ephemeral:true })
+    return inter.reply({ content:`Council poll created for **${item}** in ${postChannel}.`, flags: MessageFlags.Ephemeral })
   }
 
   else if (sub === 'status') {
     if (!isAdmin(inter.member) && !isCouncil(inter.member)) {
-      return inter.reply({ content:'Leadership only.', ephemeral:true })
+      return inter.reply({ content:'Leadership only.', flags: MessageFlags.Ephemeral })
     }
     const id = Number(inter.options.getString('id', true))
     const poll = await getCouncilPollById(id)
-    if (!poll) return inter.reply({ content:'Council poll not found.', ephemeral:true })
+    if (!poll) return inter.reply({ content:'Council poll not found.', flags: MessageFlags.Ephemeral })
 
     const cmembers = await councilMembers(inter.guild)
     const cands = await getCouncilCandidates(poll.id)
@@ -1348,18 +1090,18 @@ async function handleCouncil(inter) {
     const notVoted = cmembers.filter(m => !votedSet.has(m.id))
 
     const embed = councilEmbed(poll, cands.map(c => ({ user_id:c.user_id, user_name:c.user_name })), tally, notVoted.length, notVoted)
-    return inter.reply({ embeds:[embed], ephemeral:true })
+    return inter.reply({ embeds:[embed], flags: MessageFlags.Ephemeral })
   }
 
   else if (sub === 'close') {
     if (!isAdmin(inter.member) && !isCouncil(inter.member)) {
-      return inter.reply({ content:'Leadership only.', ephemeral:true })
+      return inter.reply({ content:'Leadership only.', flags: MessageFlags.Ephemeral })
     }
     const id = Number(inter.options.getString('id', true))
     const poll = await getCouncilPollById(id)
-    if (!poll) return inter.reply({ content:'Council poll not found.', ephemeral:true })
+    if (!poll) return inter.reply({ content:'Council poll not found.', flags: MessageFlags.Ephemeral })
     await doCloseCouncilPoll(inter.guild, poll, 'manual')
-    return inter.reply({ content:`Closed council poll **${poll.item_name}**.`, ephemeral:true })
+    return inter.reply({ content:`Closed council poll **${poll.item_name}**.`, flags: MessageFlags.Ephemeral })
   }
 }
 
@@ -1367,14 +1109,14 @@ async function handleCouncilVote(inter) {
   const [, , pollIdStr, candidateId] = inter.customId.split(':') // council:vote:<pollId>:<candidate_user_id>
   const pollId = Number(pollIdStr)
   const poll = await getCouncilPollById(pollId)
-  if (!poll) return inter.reply({ content:'Poll not found.', ephemeral:true })
-  if (!poll.is_open) return inter.reply({ content:'Poll is closed.', ephemeral:true })
-  if (!isCouncil(inter.member)) return inter.reply({ content:'Council only.', ephemeral:true })
+  if (!poll) return inter.reply({ content:'Poll not found.', flags: MessageFlags.Ephemeral })
+  if (!poll.is_open) return inter.reply({ content:'Poll is closed.', flags: MessageFlags.Ephemeral })
+  if (!isCouncil(inter.member)) return inter.reply({ content:'Council only.', flags: MessageFlags.Ephemeral })
 
   // Ensure candidate belongs to this poll
   const candidates = await getCouncilCandidates(pollId)
   const ok = candidates.some(c => c.user_id === candidateId)
-  if (!ok) return inter.reply({ content:'Invalid candidate.', ephemeral:true })
+  if (!ok) return inter.reply({ content:'Invalid candidate.', flags: MessageFlags.Ephemeral })
 
   await councilVote(pollId, candidateId, inter.user.id, niceName(inter))
 
@@ -1392,23 +1134,23 @@ async function handleCouncilVote(inter) {
 
   if (notVoted.length === 0 || hasMajority) {
     await doCloseCouncilPoll(inter.guild, poll, hasMajority ? 'majority' : 'all-voted')
-    return inter.reply({ content:'Vote recorded. Poll closed.', ephemeral:true })
+    return inter.reply({ content:'Vote recorded. Poll closed.', flags: MessageFlags.Ephemeral })
   }
 
   const embed = councilEmbed(poll, candidates.map(c => ({ user_id:c.user_id, user_name:c.user_name })), tally, notVoted.length, notVoted)
   const components = councilButtons(poll, candidates.map(c => ({ user_id:c.user_id, user_name:c.user_name })), true)
   // Update the message (edit in place)
   await inter.message.edit({ embeds:[embed], components })
-  return inter.reply({ content:'Vote recorded.', ephemeral:true })
+  return inter.reply({ content:'Vote recorded.', flags: MessageFlags.Ephemeral })
 }
 
 async function handleCouncilClose(inter) {
   const pollId = Number(inter.customId.split(':')[2])
   const poll = await getCouncilPollById(pollId)
-  if (!poll) return inter.reply({ content:'Poll not found.', ephemeral:true })
-  if (!isAdmin(inter.member) && !isCouncil(inter.member)) return inter.reply({ content:'Leadership only.', ephemeral:true })
+  if (!poll) return inter.reply({ content:'Poll not found.', flags: MessageFlags.Ephemeral })
+  if (!isAdmin(inter.member) && !isCouncil(inter.member)) return inter.reply({ content:'Leadership only.', flags: MessageFlags.Ephemeral })
   await doCloseCouncilPoll(inter.guild, poll, 'manual')
-  return inter.reply({ content:'Poll closed.', ephemeral:true })
+  return inter.reply({ content:'Poll closed.', flags: MessageFlags.Ephemeral })
 }
 
 // Finalize: compute winner(s), close, update message
@@ -1462,86 +1204,86 @@ async function doCloseCouncilPoll(guild, poll, reason) {
 async function handlePoll(inter) {
   const sub = inter.options.getSubcommand()
   const guildId = inter.guildId
-  if (!guildId) return inter.reply({ content: 'Guild-only command.', ephemeral: true })
+  if (!guildId) return inter.reply({ content: 'Guild-only command.', flags: MessageFlags.Ephemeral })
 
   if (sub === 'create') {
     const name = inter.options.getString('name', true).trim()
     const type = inter.options.getString('type', true)
     const mode = inter.options.getString('mode', true)
     const expiresHours = inter.options.getInteger('expires_hours')
-    if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create polls.', ephemeral: true })
-    if (!TYPES.includes(type) || !MODES.includes(mode)) return inter.reply({ content: 'Invalid type or mode.', ephemeral: true })
+    if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create polls.', flags: MessageFlags.Ephemeral })
+    if (!TYPES.includes(type) || !MODES.includes(mode)) return inter.reply({ content: 'Invalid type or mode.', flags: MessageFlags.Ephemeral })
 
     let expires = null
     if (expiresHours && expiresHours > 0) expires = Date.now() + (expiresHours * 3600 * 1000)
 
-    const exists = await getPollByName(guildId, name)
-    if (exists) return inter.reply({ content: 'A poll with that name already exists.', ephemeral: true })
+    const exists = await pollsRepo.getPollByName(guildId, name)
+    if (exists) return inter.reply({ content: 'A poll with that name already exists.', flags: MessageFlags.Ephemeral })
 
-    const poll = await createPoll({ guild_id: guildId, name, expires_at: expires, type, mode })
+    const poll = await pollsRepo.createPoll({ guild_id: guildId, name, expires_at: expires, type, mode })
     await inter.reply({ content: `Created poll **${poll.name}** (ID ${poll.id}).` })
     await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
   } else if (sub === 'repost') {
   const idOrName = inter.options.getString('poll', true)
   const poll = await resolvePoll(guildId, idOrName)
-  if (!poll) return inter.reply({ content: 'Poll not found.', ephemeral: true })
+  if (!poll) return inter.reply({ content: 'Poll not found.', flags: MessageFlags.Ephemeral })
 
   const chan = getPollChannel(inter.guild) || inter.channel
   await upsertPollMessage(chan, poll)
-  return inter.reply({ content: `Reposted **${poll.name}** to ${chan}.`, ephemeral: true })
+  return inter.reply({ content: `Reposted **${poll.name}** to ${chan}.`, flags: MessageFlags.Ephemeral })
   } else if (sub === 'add') {
     const idOrName = inter.options.getString('poll', true)
     const itemName = inter.options.getString('item', true).trim()
     const category = inter.options.getString('category', true)
     const slot = inter.options.getString('slot') || ''
-    if (!CATS.includes(category)) return inter.reply({ content: 'Category must be weapon, armor, or accessory.', ephemeral: true })
-    if (slot && !SLOTS.includes(slot)) return inter.reply({ content: 'Invalid slot.', ephemeral: true })
+    if (!CATS.includes(category)) return inter.reply({ content: 'Category must be weapon, armor, or accessory.', flags: MessageFlags.Ephemeral })
+    if (slot && !SLOTS.includes(slot)) return inter.reply({ content: 'Invalid slot.', flags: MessageFlags.Ephemeral })
     const poll = await resolvePoll(guildId, idOrName)
-    if (!poll) return inter.reply({ content: 'Poll not found.', ephemeral: true })
-    if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can add items.', ephemeral: true })
-    if (!poll.is_open) return inter.reply({ content: 'Poll is closed.', ephemeral: true })
+    if (!poll) return inter.reply({ content: 'Poll not found.', flags: MessageFlags.Ephemeral })
+    if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can add items.', flags: MessageFlags.Ephemeral })
+    if (!poll.is_open) return inter.reply({ content: 'Poll is closed.', flags: MessageFlags.Ephemeral })
 
-    const existing = await getItemByName(poll.id, itemName)
-    if (existing) return inter.reply({ content: 'That item already exists in this poll.', ephemeral: true })
+    const existing = await itemsRepo.getItemByName(poll.id, itemName)
+    if (existing) return inter.reply({ content: 'That item already exists in this poll.', flags: MessageFlags.Ephemeral })
 
-    await upsertItem(poll.id, itemName, category, slot)
+    await itemsRepo.upsertItem(poll.id, itemName, category, slot)
     await inter.reply({ content: `Added **${itemName}** (${labelCat(category)}${slot?` • ${slot}`:''}) to **${poll.name}**.` })
     await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
   }
   else if (sub === 'preset') {
-    if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create presets.', ephemeral: true })
+    if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create presets.', flags: MessageFlags.Ephemeral })
     const boss = inter.options.getString('boss', true)
     const type = inter.options.getString('type', true)
     const mode = inter.options.getString('mode', true)
     const nameOverride = inter.options.getString('name')
     const expiresHours = inter.options.getInteger('expires_hours')
 
-    if (!TYPES.includes(type) || !MODES.includes(mode)) return inter.reply({ content: 'Invalid type or mode.', ephemeral: true })
+    if (!TYPES.includes(type) || !MODES.includes(mode)) return inter.reply({ content: 'Invalid type or mode.', flags: MessageFlags.Ephemeral })
 
     const pollName = nameOverride || `${boss} — ${labelType(type)} • ${labelMode(mode)}`
-    const exists = await getPollByName(guildId, pollName)
-    if (exists) return inter.reply({ content: 'A poll with that name already exists.', ephemeral: true })
+    const exists = await pollsRepo.getPollByName(guildId, pollName)
+    if (exists) return inter.reply({ content: 'A poll with that name already exists.', flags: MessageFlags.Ephemeral })
 
     let expires = null
     if (expiresHours && expiresHours > 0) expires = Date.now() + (expiresHours * 3600 * 1000)
 
-    const poll = await createPoll({ guild_id: guildId, name: pollName, expires_at: expires, type, mode })
+    const poll = await pollsRepo.createPoll({ guild_id: guildId, name: pollName, expires_at: expires, type, mode })
     const rows = await loadPresetItems({ boss, type })
     if (!rows.length) {
-      await inter.reply({ content: `Created **${poll.name}** but found no preset rows for boss "${boss}" (${labelType(type)}). Add rows to the Presets tab.`, ephemeral: true })
+      await inter.reply({ content: `Created **${poll.name}** but found no preset rows for boss "${boss}" (${labelType(type)}). Add rows to the Presets tab.`, flags: MessageFlags.Ephemeral })
       await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
       return
     }
     for (const r of rows) {
       if (!CATS.includes(r.category)) continue
       const slot = (r.slot||'')
-      await upsertItem(poll.id, r.item, r.category, slot)
+      await itemsRepo.upsertItem(poll.id, r.item, r.category, slot)
     }
     await inter.reply({ content: `Created poll **${poll.name}** with ${rows.length} preset item(s).` })
     await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
   }
   else if (sub === 'list') {
-    const rows = await listPolls(guildId)
+    const rows = await pollsRepo.listPolls(guildId)
     if (!rows.length) return inter.reply({ content: 'No polls yet.' })
     const lines = rows.map(p => `• **${p.name}** (ID ${p.id}) — ${labelType(p.type)} • ${labelMode(p.mode)} — ${p.is_open? 'open':'closed'}${p.expires_at ? ` — expires <t:${Math.floor(p.expires_at/1000)}:R>`:''}`)
     return inter.reply({ content: lines.join('\n') })
@@ -1552,17 +1294,17 @@ async function handlePoll(inter) {
   const hideZero = inter.options.getBoolean('hide_zero') || false
 
   const poll = await resolvePoll(inter.guildId, idOrName)
-  if (!poll) return inter.reply({ content: 'Poll not found.', ephemeral: true })
+  if (!poll) return inter.reply({ content: 'Poll not found.', flags: MessageFlags.Ephemeral })
 
-  const items = await getItems(poll.id)
+  const items = await itemsRepo.getItems(poll.id)
   // attach counts & voters
   for (const it of items) {
-    it._count = await countVotesForItem(poll.id, it.id)
-    it._voters = includeVoters ? await votersForItem(poll.id, it.id) : []
+    it._count = await votesRepo.countVotesForItem(poll.id, it.id)
+    it._voters = includeVoters ? await votesRepo.votersForItem(poll.id, it.id) : []
   }
 
   const visible = hideZero ? items.filter(i => i._count > 0) : items
-  if (!visible.length) return inter.reply({ content: 'No results to show.', ephemeral: true })
+  if (!visible.length) return inter.reply({ content: 'No results to show.', flags: MessageFlags.Ephemeral })
 
   // Build fields respecting embed limits
   const fields = []
@@ -1617,20 +1359,20 @@ async function handlePoll(inter) {
       content: `Results for **${poll.name}**`,
       files: [{ attachment: buf, name: `poll-${poll.id}-results.txt` }]
     })
-    return inter.reply({ content: `Posted results in ${targetChannel}.`, ephemeral: true })
+    return inter.reply({ content: `Posted results in ${targetChannel}.`, flags: MessageFlags.Ephemeral })
   }
 
   await targetChannel.send({ embeds: [embed] })
-  return inter.reply({ content: `Posted results in ${targetChannel}.`, ephemeral: true })
+  return inter.reply({ content: `Posted results in ${targetChannel}.`, flags: MessageFlags.Ephemeral })
 }
   else if (sub === 'slot') {
-    if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create polls.', ephemeral: true });
+    if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create polls.', flags: MessageFlags.Ephemeral });
     const slot = (inter.options.getString('slot', true) || '').toLowerCase();
     const mode = inter.options.getString('mode', true);
     const expiresHours = inter.options.getInteger('expires_hours');
     const nameOverride = inter.options.getString('name');
     const rows = await loadPresetItemsBySlot(slot);
-    if (!rows.length) return inter.reply({ content: `No preset rows found for slot "${slot}".`, ephemeral: true });
+    if (!rows.length) return inter.reply({ content: `No preset rows found for slot "${slot}".`, flags: MessageFlags.Ephemeral });
     const uniq = [];
     const seen = new Set();
     for (const r of rows) {
@@ -1645,11 +1387,11 @@ async function handlePoll(inter) {
     if (expiresHours && expiresHours > 0) expires = Date.now() + (expiresHours * 3600 * 1000);
 
     const pollName = nameOverride || `${labelSlot(slot)} — ${labelMode(mode)}`;
-    const exists = await getPollByName(inter.guildId, pollName);
-    if (exists) return inter.reply({ content: `Poll "${pollName}" already exists.`, ephemeral: true });
+    const exists = await pollsRepo.getPollByName(guildId, pollName);
+    if (exists) return inter.reply({ content: `Poll "${pollName}" already exists.`, flags: MessageFlags.Ephemeral });
 
     // Use "mixed" for type label since this spans multiple bosses/types
-    const poll = await createPoll({
+    const poll = await pollsRepo.createPoll({
       guild_id: inter.guildId,
       name: pollName,
       expires_at: expires,
@@ -1659,7 +1401,7 @@ async function handlePoll(inter) {
 
     for (const r of uniq) {
       if (!CATS.includes(r.category)) continue; // guard
-      await upsertItem(poll.id, r.item, r.category, r.slot || '');
+      await itemsRepo.upsertItem(poll.id, r.item, r.category, r.slot || '');
     }
 
     await inter.reply({ content: `Created **${poll.name}** with ${uniq.length} item(s) for slot **${labelSlot(slot)}**.` });
@@ -1668,12 +1410,12 @@ async function handlePoll(inter) {
   else if (sub === 'close') {
     const idOrName = inter.options.getString('poll', true)
     const poll = await resolvePoll(guildId, idOrName)
-    if (!poll) return inter.reply({ content: 'Poll not found.', ephemeral: true })
-    if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can close polls.', ephemeral: true })
-    await setPollClosed(poll.id)
+    if (!poll) return inter.reply({ content: 'Poll not found.', flags: MessageFlags.Ephemeral })
+    if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can close polls.', flags: MessageFlags.Ephemeral })
+    await pollsRepo.setPollClosed(poll.id)
     const updated = { ...poll, is_open: 0 }
     await inter.reply({ content: `Closed poll **${poll.name}**.` })
-    await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
+    await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, updated)
   }
 }
 
@@ -1683,16 +1425,16 @@ async function handleVote(inter) {
   const itemName = inter.options.getString('item', true)
   const mode = inter.options.getString('mode', true)
   const poll = await resolvePoll(guildId, idOrName)
-  if (!poll) return inter.reply({ content: 'Poll not found.', ephemeral: true })
-  if (!poll.is_open) return inter.reply({ content: 'Poll is closed.', ephemeral: true })
-  const item = await getItemByName(poll.id, itemName)
-  if (!item) return inter.reply({ content: 'Item not found in this poll.', ephemeral: true })
+  if (!poll) return inter.reply({ content: 'Poll not found.', flags: MessageFlags.Ephemeral })
+  if (!poll.is_open) return inter.reply({ content: 'Poll is closed.', flags: MessageFlags.Ephemeral })
+  const item = await itemsRepo.getItemByName(poll.id, itemName)
+  if (!item) return inter.reply({ content: 'Item not found in this poll.', flags: MessageFlags.Ephemeral })
 
   const gate = await checkVoteAllowedByMode(poll, inter.user.id, item, mode)
-  if (!gate.ok) return inter.reply({ content: `Cannot vote: ${gate.reason}`, ephemeral: true })
+  if (!gate.ok) return inter.reply({ content: `Cannot vote: ${gate.reason}`, flags: MessageFlags.Ephemeral })
 
- await voteWithMode(poll.id, item.id, inter.user.id, niceName(inter), mode)
- await inter.reply({ content: `Voted for **${item.name}** — ${labelModeLong(mode)}.`, ephemeral: true })
+ await votesRepo.voteWithMode(poll.id, item.id, inter.user.id, niceName(inter), mode)
+ await inter.reply({ content: `Voted for **${item.name}** — ${labelModeLong(mode)}.`, flags: MessageFlags.Ephemeral })
  await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
 }
 
@@ -1702,38 +1444,38 @@ async function handleUnvote(inter) {
   const itemName = inter.options.getString('item', true)
   const mode = inter.options.getString('mode')
   const poll = await resolvePoll(guildId, idOrName)
-  if (!poll) return inter.reply({ content: 'Poll not found.', ephemeral: true })
-  const item = await getItemByName(poll.id, itemName)
-  if (!item) return inter.reply({ content: 'Item not found in this poll.', ephemeral: true })
+  if (!poll) return inter.reply({ content: 'Poll not found.', flags: MessageFlags.Ephemeral })
+  const item = await itemsRepo.getItemByName(poll.id, itemName)
+  if (!item) return inter.reply({ content: 'Item not found in this poll.', flags: MessageFlags.Ephemeral })
 
 let removed = 0
- if (mode) removed = await removeVoteForUserItemMode(poll.id, item.id, inter.user.id, mode)
- else       removed = await removeVoteForUserItemAllModes(poll.id, item.id, inter.user.id)
- if (!removed) return inter.reply({ content: `You had no vote on **${item.name}**${mode?` — ${labelModeLong(mode)}`:''}.`, ephemeral: true })
- await inter.reply({ content: `Removed your vote${mode?` — ${labelModeLong(mode)}`:''} from **${item.name}**.`, ephemeral: true })
+ if (mode) removed = await votesRepo.removeVoteForUserItemMode(poll.id, item.id, inter.user.id, mode)
+ else       removed = await votesRepo.removeVoteForUserItemAllModes(poll.id, item.id, inter.user.id)
+ if (!removed) return inter.reply({ content: `You had no vote on **${item.name}**${mode?` — ${labelModeLong(mode)}`:''}.`, flags: MessageFlags.Ephemeral })
+ await inter.reply({ content: `Removed your vote${mode?` — ${labelModeLong(mode)}`:''} from **${item.name}**.`, flags: MessageFlags.Ephemeral })
  await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
 }
 
 async function handleAdmin(inter) {
-  if (!isAdmin(inter.member)) return inter.reply({ content: 'Admin only.', ephemeral: true })
+  if (!isAdmin(inter.member)) return inter.reply({ content: 'Admin only.', flags: MessageFlags.Ephemeral })
   const sub = inter.options.getSubcommand()
   const guildId = inter.guildId
   const idOrName = inter.options.getString('poll', true)
   const poll = await resolvePoll(guildId, idOrName)
-  if (!poll) return inter.reply({ content: 'Poll not found.', ephemeral: true })
+  if (!poll) return inter.reply({ content: 'Poll not found.', flags: MessageFlags.Ephemeral })
 
   if (sub === 'clearvotes') {
     const user = inter.options.getUser('user', true)
-    const removed = await clearVotesForUser(poll.id, user.id)
+    const removed = await votesRepo.clearVotesForUser(poll.id, user.id)
     await inter.reply({ content: `Cleared ${removed} vote(s) for ${user} in **${poll.name}**.` })
     await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
   }
   else if (sub === 'removevote') {
     const user = inter.options.getUser('user', true)
     const itemName = inter.options.getString('item', true)
-    const item = await getItemByName(poll.id, itemName)
-    if (!item) return inter.reply({ content: 'Item not found in this poll.', ephemeral: true })
-    const removed = await removeVoteForUserItem(poll.id, item.id, user.id)
+    const item = await itemsRepo.getItemByName(poll.id, itemName)
+    if (!item) return inter.reply({ content: 'Item not found in this poll.', flags: MessageFlags.Ephemeral })
+    const removed = await votesRepo.removeVoteForUserItem(poll.id, item.id, user.id)
     await inter.reply({ content: removed ? `Removed ${user}'s vote for **${item.name}**.` : `${user} had no vote on **${item.name}**.` })
     await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
   }
@@ -1746,10 +1488,10 @@ async function handleAdmin(inter) {
 async function handleVoteButton(inter) {
   const itemId = Number(inter.customId.split(':')[1])
   const poll = await getPollIdForItem(itemId)
-  if (!poll) return inter.reply({ content: 'Poll not found (item may have been deleted).', ephemeral: true })
-  if (!poll.is_open) return inter.reply({ content: 'Poll closed.', ephemeral: true })
-  const item = (await getItems(poll.id)).find(i=>i.id===itemId)
-  if (!item) return inter.reply({ content: 'Item not found.', ephemeral: true })
+  if (!poll) return inter.reply({ content: 'Poll not found (item may have been deleted).', flags: MessageFlags.Ephemeral })
+  if (!poll.is_open) return inter.reply({ content: 'Poll closed.', flags: MessageFlags.Ephemeral })
+  const item = (await itemsRepo.getItems(poll.id)).find(i => i.id === itemId)
+  if (!item) return inter.reply({ content: 'Item not found.', flags: MessageFlags.Ephemeral })
 
   // Which modes does this user already have for this item?
   const vs = await readSheet(SHEET_VOTES)
@@ -1783,7 +1525,7 @@ async function handleVoteButton(inter) {
   return inter.reply({
     content: `**${item.name}** — choose what this vote is for:`,
     components: rows,
-    ephemeral: true
+    flags: MessageFlags.Ephemeral
   })
 }
 
@@ -1791,17 +1533,17 @@ async function handleVoteModeAdd(inter) {
   const [, , pollIdStr, itemIdStr, mode] = inter.customId.split(':') // vote-mode-add:<pollId>:<itemId>:<mode>
   const pollId = Number(pollIdStr)
   const itemId = Number(itemIdStr)
-  const poll = await getPollById(pollId)
-  if (!poll) return inter.reply({ content: 'Poll not found.', ephemeral: true })
-  if (!poll.is_open) return inter.reply({ content: 'Poll closed.', ephemeral: true })
-  const item = (await getItems(poll.id)).find(i => i.id === itemId)
-  if (!item) return inter.reply({ content: 'Item not found.', ephemeral: true })
+  const poll = await pollsRepo.getPollById(pollId)
+  if (!poll) return inter.reply({ content: 'Poll not found.', flags: MessageFlags.Ephemeral })
+  if (!poll.is_open) return inter.reply({ content: 'Poll closed.', flags: MessageFlags.Ephemeral })
+  const item = (await itemsRepo.getItems(poll.id)).find(i => i.id === itemId)
+  if (!item) return inter.reply({ content: 'Item not found.', flags: MessageFlags.Ephemeral })
 
   const gate = await checkVoteAllowedByMode(poll, inter.user.id, item, mode)
-  if (!gate.ok) return inter.reply({ content: `Cannot vote: ${gate.reason}`, ephemeral: true })
+  if (!gate.ok) return inter.reply({ content: `Cannot vote: ${gate.reason}`, flags: MessageFlags.Ephemeral })
 
-  await voteWithMode(poll.id, item.id, inter.user.id, niceName(inter), mode)
-  await inter.reply({ content: `Voted for **${item.name}** — ${labelModeLong(mode)}.`, ephemeral: true })
+  await votesRepo.voteWithMode(poll.id, item.id, inter.user.id, niceName(inter), mode)
+  await inter.reply({ content: `Voted for **${item.name}** — ${labelModeLong(mode)}.`, flags: MessageFlags.Ephemeral })
 
   const chan = getPollChannel(inter.guild) || inter.channel
   await upsertPollMessage(chan, poll)
@@ -1811,15 +1553,15 @@ async function handleVoteModeRemove(inter) {
   const [, , pollIdStr, itemIdStr, mode] = inter.customId.split(':') // vote-mode-remove:<pollId>:<itemId>:<mode>
   const pollId = Number(pollIdStr)
   const itemId = Number(itemIdStr)
-  const poll = await getPollById(pollId)
-  if (!poll) return inter.reply({ content: 'Poll not found.', ephemeral: true })
-  const item = (await getItems(poll.id)).find(i => i.id === itemId)
-  if (!item) return inter.reply({ content: 'Item not found.', ephemeral: true })
+  const poll = await pollsRepo.getPollById(pollId)
+  if (!poll) return inter.reply({ content: 'Poll not found.', flags: MessageFlags.Ephemeral })
+  const item = (await itemsRepo.getItems(poll.id)).find(i => i.id === itemId)
+  if (!item) return inter.reply({ content: 'Item not found.', flags: MessageFlags.Ephemeral })
 
-  const removed = await removeVoteForUserItemMode(pollId, itemId, inter.user.id, mode)
-  if (!removed) return inter.reply({ content: `You had no **${labelModeLong(mode)}** vote on **${item.name}**.`, ephemeral: true })
+  const removed = await votesRepo.removeVoteForUserItemMode(pollId, itemId, inter.user.id, mode)
+  if (!removed) return inter.reply({ content: `You had no **${labelModeLong(mode)}** vote on **${item.name}**.`, flags: MessageFlags.Ephemeral })
 
-  await inter.reply({ content: `Removed your **${labelModeLong(mode)}** vote for **${item.name}**.`, ephemeral: true })
+  await inter.reply({ content: `Removed your **${labelModeLong(mode)}** vote for **${item.name}**.`, flags: MessageFlags.Ephemeral })
 
   const chan = getPollChannel(inter.guild) || inter.channel
   await upsertPollMessage(chan, poll)
@@ -1832,7 +1574,7 @@ async function getPollIdForItem(itemId){
   for (const r of rows) {
     if (parseInt(r[m.get('id')],10) === Number(itemId)) {
       const poll_id = parseInt(r[m.get('poll_id')],10)
-      return await getPollById(poll_id)
+      return await pollsRepo.getPollById(poll_id)
     }
   }
   return null
@@ -1841,16 +1583,16 @@ async function getPollIdForItem(itemId){
 async function handleAdminPanel(inter) {
   const parts = inter.customId.split(':'); // admin:panel:<pollId>
   const pollId = Number(parts[2]);
-  const poll = await getPollById(pollId);
+  const poll = await pollsRepo.getPollById(pollId);
 
   if (!isAdmin(inter.member)) {
-    return inter.reply({ content: 'Admin only.', ephemeral: true });
+    return inter.reply({ content: 'Admin only.', flags: MessageFlags.Ephemeral });
   }
   if (!poll) {
-    return inter.reply({ content: 'Poll not found for this admin panel.', ephemeral: true });
+    return inter.reply({ content: 'Poll not found for this admin panel.', flags: MessageFlags.Ephemeral });
   }
 
-  const items = await getItems(poll.id);
+  const items = await itemsRepo.getItems(poll.id);
   const hasItems = items.length > 0;
 
   const menu = new StringSelectMenuBuilder()
@@ -1886,12 +1628,12 @@ async function handleAdminPanel(inter) {
     .setTitle(`Admin • ${poll.name}`)
     .setDescription('Select an item to view/modify voters, or use actions below.');
 
-  return inter.reply({ embeds:[embed], components:[row1, row2], ephemeral:true });
+  return inter.reply({ embeds:[embed], components:[row1, row2], flags: MessageFlags.Ephemeral });
 }
 
 
 async function renderItemAdminView(inter, poll, item) {
-  const voters = await votersForItem(poll.id, item.id); // [{id,name}]
+  const voters = await votesRepo.votersForItem(poll.id, item.id); // [{id,name}]
   const names = voters.map(fmtVoter);
   const header = `**${itemLabel(item)}** — ${names.length} vote${names.length===1?'':'s'}`;
 
@@ -1945,19 +1687,19 @@ async function renderItemAdminView(inter, poll, item) {
   if (inter.deferred || inter.replied) {
     return inter.editReply(payload);
   }
-  return inter.reply({ ...payload, ephemeral: true });
+  return inter.reply({ ...payload, flags: MessageFlags.Ephemeral });
 }
 
 
 async function handleAdminSelectItem(inter) {
-  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', ephemeral:true })
+  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', flags: MessageFlags.Ephemeral })
   const [ , , pollIdStr ] = inter.customId.split(':') // admin:item:<pollId>
   const pollId = Number(pollIdStr)
   const itemId = Number(inter.values?.[0])
-  const poll = await getPollById(pollId)
-  if (!poll) return inter.reply({ content:'Poll not found.', ephemeral:true })
-  const item = (await getItems(pollId)).find(i => i.id === itemId)
-  if (!item) return inter.reply({ content:'Item not found.', ephemeral:true })
+  const poll = await pollsRepo.getPollById(pollId)
+  if (!poll) return inter.reply({ content:'Poll not found.', flags: MessageFlags.Ephemeral })
+  const item = (await itemsRepo.getItems(pollId)).find(i => i.id === itemId)
+  if (!item) return inter.reply({ content:'Item not found.', flags: MessageFlags.Ephemeral })
 
   // show item admin view
   return inter.update({ content: 'Loading…', components: [], embeds: [] })
@@ -1966,60 +1708,60 @@ async function handleAdminSelectItem(inter) {
 }
 
 async function handleAdminPickVoter(inter) {
-  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', ephemeral:true })
+  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', flags: MessageFlags.Ephemeral })
   const [ , , pollIdStr, itemIdStr ] = inter.customId.split(':') // admin:pickvoter:<pollId>:<itemId>
   const pollId = Number(pollIdStr)
   const itemId = Number(itemIdStr)
   const userId = inter.values?.[0]
-  if (!userId) return inter.reply({ content:'No user selected.', ephemeral:true })
-  const poll = await getPollById(pollId)
-  if (!poll) return inter.reply({ content:'Poll not found.', ephemeral:true })
-  const item = (await getItems(pollId)).find(i => i.id === itemId)
-  if (!item) return inter.reply({ content:'Item not found.', ephemeral:true })
+  if (!userId) return inter.reply({ content:'No user selected.', flags: MessageFlags.Ephemeral })
+  const poll = await pollsRepo.getPollById(pollId)
+  if (!poll) return inter.reply({ content:'Poll not found.', flags: MessageFlags.Ephemeral })
+  const item = (await itemsRepo.getItems(pollId)).find(i => i.id === itemId)
+  if (!item) return inter.reply({ content:'Item not found.', flags: MessageFlags.Ephemeral })
 
-  await removeVoteForUserItem(pollId, itemId, userId)
+  await votesRepo.removeVoteForUserItem(pollId, itemId, userId)
   await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
   // re-render
   return renderItemAdminView(inter, poll, item)
 }
 
 async function handleAdminClearItem(inter) {
-  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', ephemeral:true })
+  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', flags: MessageFlags.Ephemeral })
   const [ , , pollIdStr, itemIdStr ] = inter.customId.split(':') // admin:clearitem:<pollId>:<itemId>
   const pollId = Number(pollIdStr)
   const itemId = Number(itemIdStr)
-  const poll = await getPollById(pollId)
-  if (!poll) return inter.reply({ content:'Poll not found.', ephemeral:true })
-  const item = (await getItems(pollId)).find(i => i.id === itemId)
-  if (!item) return inter.reply({ content:'Item not found.', ephemeral:true })
+  const poll = await pollsRepo.getPollById(pollId)
+  if (!poll) return inter.reply({ content:'Poll not found.', flags: MessageFlags.Ephemeral })
+  const item = (await itemsRepo.getItems(pollId)).find(i => i.id === itemId)
+  if (!item) return inter.reply({ content:'Item not found.', flags: MessageFlags.Ephemeral })
 
-  const removed = await clearVotesForItem(pollId, itemId)
+  const removed = await votesRepo.clearVotesForItem(pollId, itemId)
   await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
   return renderItemAdminView(inter, poll, item)
-    .then(()=> inter.followUp({ content:`Cleared ${removed} vote(s) for **${itemLabel(item)}**.`, ephemeral:true }))
+    .then(()=> inter.followUp({ content:`Cleared ${removed} vote(s) for **${itemLabel(item)}**.`, flags: MessageFlags.Ephemeral }))
 }
 
 async function handleAdminClearPoll(inter) {
-  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', ephemeral:true })
+  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', flags: MessageFlags.Ephemeral })
   const pollId = Number(inter.customId.split(':')[2]) // admin:clearpoll:<pollId>
-  const poll = await getPollById(pollId)
-  if (!poll) return inter.reply({ content:'Poll not found.', ephemeral:true })
+  const poll = await pollsRepo.getPollById(pollId)
+  if (!poll) return inter.reply({ content:'Poll not found.', flags: MessageFlags.Ephemeral })
 
-  const removed = await clearAllVotesInPoll(pollId)
+  const removed = await votesRepo.clearAllVotesInPoll(pollId)
   await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
   return inter.update({ content:`Cleared ${removed} vote(s) in **${poll.name}**.`, embeds:[], components:[] })
 }
 
 async function handleAdminVotersPoll(inter) {
-  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', ephemeral:true })
+  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', flags: MessageFlags.Ephemeral })
   const pollId = Number(inter.customId.split(':')[2]) // admin:voterspoll:<pollId>
-  const poll = await getPollById(pollId)
-  if (!poll) return inter.reply({ content:'Poll not found.', ephemeral:true })
+  const poll = await pollsRepo.getPollById(pollId)
+  if (!poll) return inter.reply({ content:'Poll not found.', flags: MessageFlags.Ephemeral })
 
-  const items = await getItems(poll.id)
+  const items = await itemsRepo.getItems(poll.id)
   const blocks = []
   for (const it of items) {
-    const voters = await votersForItem(poll.id, it.id)
+    const voters = await votesRepo.votersForItem(poll.id, it.id)
     const names = voters.map(fmtVoter)
     blocks.push(`**${itemLabel(it)}** — ${names.length} vote${names.length===1?'':'s'}\n${names.length?names.map(n=>`• ${n}`).join('\n'):'• none'}`)
   }
@@ -2029,24 +1771,24 @@ async function handleAdminVotersPoll(inter) {
     return inter.reply({
       content: `Voters for **${poll.name}** (attached).`,
       files: [{ attachment: buf, name: `voters-poll-${poll.id}.txt` }],
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     })
   }
-  return inter.reply({ content, ephemeral:true })
+  return inter.reply({ content, flags: MessageFlags.Ephemeral })
 }
 
 async function handleAdminCrossMode(inter) {
-  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', ephemeral:true })
+  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', flags: MessageFlags.Ephemeral })
   const [ , , pollIdStr, itemIdStr, mode ] = inter.customId.split(':') // admin:cross:<pollId>:<itemId>:<mode>
   const pollId = Number(pollIdStr)
   const itemId = Number(itemIdStr)
-  const poll = await getPollById(pollId)
-  if (!poll) return inter.reply({ content:'Poll not found.', ephemeral:true })
-  const item = (await getItems(pollId)).find(i => i.id === itemId)
-  if (!item) return inter.reply({ content:'Item not found.', ephemeral:true })
+  const poll = await pollsRepo.getPollById(pollId)
+  if (!poll) return inter.reply({ content:'Poll not found.', flags: MessageFlags.Ephemeral })
+  const item = (await itemsRepo.getItems(pollId)).find(i => i.id === itemId)
+  if (!item) return inter.reply({ content:'Item not found.', flags: MessageFlags.Ephemeral })
 
   const agg = await aggregateVotesAcrossGuildForItemByMode(poll.guild_id, (item.name_lc||item.name.toLowerCase()), mode)
-  if (!agg.length) return inter.reply({ content:`No votes found across polls for **${item.name}** in **${labelMode(mode)}**.`, ephemeral:true })
+  if (!agg.length) return inter.reply({ content:`No votes found across polls for **${item.name}** in **${labelMode(mode)}**.`, flags: MessageFlags.Ephemeral })
 
   const blocks = agg.map(({ poll:pp, item:ii, voters }) => {
     const names = voters.map(fmtVoter)
@@ -2059,10 +1801,10 @@ async function handleAdminCrossMode(inter) {
     return inter.reply({
       content: `Cross-poll voters for **${item.name}** • ${labelMode(mode)} (attached).`,
       files: [{ attachment: buf, name: `voters-${item.name}-${mode}.txt` }],
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     })
   }
-  return inter.reply({ content, ephemeral:true })
+  return inter.reply({ content, flags: MessageFlags.Ephemeral })
 }
 
 
@@ -2073,7 +1815,7 @@ async function handleAutocomplete(inter) {
   const entered = (inter.options.getFocused() || '').toLowerCase()
   const poll = pollArg ? await resolvePoll(guildId, pollArg) : null
   if (!poll) return inter.respond([])
-  const items = await getItems(poll.id)
+  const items = await itemsRepo.getItems(poll.id)
   const choices = items
     .filter(i => `${i.name}${i.slot?` (${i.slot})`:''}`.toLowerCase().includes(entered))
     .slice(0, 25)
@@ -2082,7 +1824,7 @@ async function handleAutocomplete(inter) {
 }
 
 async function getUserVotesAcrossGuild(guild_id, { sameMode = null, onlyOpen = true, user_id }) {
-  const polls = await listPolls(guild_id);
+  const polls = await pollsRepo.listPolls(guild_id);
   const scope = polls.filter(p => (!onlyOpen || p.is_open) && (sameMode ? p.mode === sameMode : true));
 
   const votes = await readSheet(SHEET_VOTES);
@@ -2096,7 +1838,7 @@ async function getUserVotesAcrossGuild(guild_id, { sameMode = null, onlyOpen = t
     );
     if (!mine.length) continue;
 
-    const items = await getItems(p.id);
+    const items = await itemsRepo.getItems(p.id);
     const itemMap = new Map(items.map(i => [i.id, i]));
     for (const r of mine) {
       const itemId = parseInt(r[vm.get('item_id')],10);

@@ -1,6 +1,5 @@
-// src/data/votesRepo.js
 import { readSheet, appendRows, overwriteRows, idxMap } from '../infra/sheets.js'
-const TAB = 'Votes'
+import { SHEET_VOTES as TAB } from '../infra/constants.js';
 
 export async function countVotesForItem(poll_id, item_id) {
   const { header, rows } = await readSheet(TAB)
@@ -103,10 +102,10 @@ export async function deleteVotesForPoll(poll_id) {
 }
 
 export async function removeVoteForUserItem(poll_id, item_id, user_id) {
-  const { header, rows } = await readSheet(SHEET_VOTES)
+  const { header, rows } = await readSheet(TAB)
   const m = idxMap(header)
   const newRows = rows.filter(r => !(parseInt(r[m.get('poll_id')],10)===Number(poll_id) && parseInt(r[m.get('item_id')],10)===Number(item_id) && r[m.get('user_id')]===(user_id)))
   const removed = rows.length - newRows.length
-  if (removed) await overwriteRows(SHEET_VOTES, header, newRows)
+  if (removed) await overwriteRows(TAB, header, newRows)
   return removed
 }

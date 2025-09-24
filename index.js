@@ -999,6 +999,8 @@ try {
       if (interaction.customId.startsWith('vote-mode-add:'))  return handleVoteModeAdd(interaction)
       if (interaction.customId.startsWith('vote-mode-remove:')) return handleVoteModeRemove(interaction)
       if (interaction.customId.startsWith('vote-mode-replace:')) return handleVoteModeReplace(interaction)
+      if (interaction.customId.startsWith('admin:deletepoll:'))   return handleAdminDeletePoll(interaction)
+      if (interaction.customId.startsWith('admin:deleteconfirm:')) return handleAdminDeleteConfirm(interaction)
       if (interaction.customId === 'vote-mode-cancel') return handleVoteModeCancel(interaction)
     }
 
@@ -1713,7 +1715,8 @@ async function handleAdminPanel(inter) {
   const row1 = new ActionRowBuilder().addComponents(menu);
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`admin:voterspoll:${poll.id}`).setLabel('Show all voters (poll)').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`admin:clearpoll:${poll.id}`).setLabel('Clear ALL votes in poll').setStyle(ButtonStyle.Danger)
+    new ButtonBuilder().setCustomId(`admin:clearpoll:${poll.id}`).setLabel('Clear ALL votes in poll').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`admin:deletepoll:${poll.id}`).setLabel('Delete Poll').setStyle(ButtonStyle.Danger)
   );
 
   const embed = new EmbedBuilder()
@@ -1842,6 +1845,62 @@ async function handleAdminClearPoll(inter) {
   const removed = await votesRepo.clearAllVotesInPoll(pollId)
   await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
   return inter.update({ content:`Cleared ${removed} vote(s) in **${poll.name}**.`, embeds:[], components:[] })
+}
+
+async function handleAdminDeletePoll(inter) {
+  if (!isAdmin(inter.member)) return inter.reply({ content: 'Admin only.', flags: MessageFlags.Ephemeral })
+  const pollId = Number(inter.customId.split(':')[2]) // admin:deletepoll:<pollId>
+  const poll = await pollsRepo.getPollById(pollId)
+  if (!poll) return inter.update({ content:'Poll not found (it may already be deleted).', components:[], embeds:[] })
+
+  const confirmRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`admin:deleteconfirm:${poll.id}`).setLabel('Yes, delete this poll').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`admin:back:${poll.id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary),
+  )
+
+  const warning = [
+    `You are about to **permanently delete** **${poll.name}** (ID ${poll.id}).`,
+    `This removes the poll, its items, and all votes from Google Sheets.`,
+    `This action **cannot be undone**.`
+  ].join('\n')
+
+  return inter.update({ content: warning, components:[confirmRow], embeds:[] })
+}
+
+async function handleAdminDeleteConfirm(inter) {
+  if (!isAdmin(inter.member)) return inter.reply({ content: 'Admin only.', flags: MessageFlags.Ephemeral })
+  const pollId = Number(inter.customId.split(':')[2]) // admin:deleteconfirm:<pollId>
+  const poll = await pollsRepo.getPollById(pollId)
+  if (!poll) return inter.update({ content:'Poll not found (it may already be deleted).', components:[], embeds:[] })
+
+  // 1) Wipe data from sheets
+  await wipePoll(poll.id)
+
+  // 2) Best-effort: remove the bot’s poll message(s) showing this poll in the likely channels
+  async function deletePollMessagesInChannel(channel, id) {
+    if (!channel?.isTextBased?.()) return
+    try {
+      const msgs = await channel.messages.fetch({ limit: 50 }).catch(()=>null)
+      if (!msgs) return
+      const mine = msgs.filter(m => m.author.id === channel.client.user.id && m.embeds[0]?.footer?.text?.includes(`Poll ID: ${id}`))
+      for (const [, m] of mine) await m.delete().catch(()=>null)
+    } catch {}
+  }
+
+  const tried = new Set()
+  const targets = []
+  const mainChan = getPollChannel(inter.guild)
+  if (mainChan && !tried.has(mainChan.id)) { targets.push(mainChan); tried.add(mainChan.id) }
+  if (inter.channel && !tried.has(inter.channel.id)) { targets.push(inter.channel); tried.add(inter.channel.id) }
+
+  for (const chan of targets) await deletePollMessagesInChannel(chan, poll.id)
+
+  // 3) Confirm to admin and clear components
+  return inter.update({
+    content: `Deleted poll **${poll.name}** (ID ${poll.id}).`,
+    components: [],
+    embeds: []
+  })
 }
 
 async function handleAdminVotersPoll(inter) {

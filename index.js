@@ -287,52 +287,37 @@ function normalizeSlotForLimits(s) {
 }
 
 function labelMode(m){ return m==='main_pve' ? 'Main PvE' : m==='offspec' ? 'Off‑spec' : 'Main PvP' }
+function labelModeLong(m) { return labelMode(m) } // alias; used in replies
+
 
 async function checkVoteAllowedByMode(poll, user_id, item, voteMode) {
   const mine = await getUserVotesAcrossGuildByMode(poll.guild_id, user_id, voteMode, { onlyOpen: true })
-
   const slot = normalizeSlotForLimits(item.slot || '')
-  const isWeapon   = item.category === 'weapon'
-  const isArmor    = item.category === 'armor'
-  const isAccessory= item.category === 'accessory'
 
-  // ---- Weapons ----
-  if (isWeapon) {
+  // ---- Weapons: 2 per mode (PvP, PvE, Off-spec) ----
+  if (item.category === 'weapon') {
     const myWeapons = mine.filter(v => v.item.category === 'weapon')
-    const totalLimit = (voteMode === 'offspec') ? 1 : 2
+    const totalLimit = 2
     if (myWeapons.length >= totalLimit) {
       return { ok:false, reason: `Limit reached: ${totalLimit} ${labelModeLong(voteMode)} weapon${totalLimit>1?'s':''}` }
     }
-    // one of each weapon type (slot must be a weapon shorthand like 'gs','lb', etc.)
-    if (WEAPON_TYPES.includes(slot)) {
-      const hasSameType = myWeapons.some(v => normalizeSlotForLimits(v.item.slot) === slot)
-      if (hasSameType) {
-        return { ok:false, reason: `Limit 1 ${labelSlot(slot)} in ${labelModeLong(voteMode)}` }
-      }
-    }
     return { ok:true }
   }
 
-  // ---- Armor ----
-  if (isArmor) {
-    const s = slot // 'cloak','helmet','chest','pants','boots','gloves' expected
-    if (ARMOR_SLOTS_LIMITED.includes(s)) {
-      const countSame = mine.filter(v => v.item.category==='armor' && normalizeSlotForLimits(v.item.slot)===s).length
-      const limit = 1
-      if (countSame >= limit) return { ok:false, reason: `Limit ${limit} ${labelSlot(s)} in ${labelModeLong(voteMode)}` }
-      return { ok:true }
-    }
-    // If some other armor slot sneaks in, allow 1 by default
-    const countOther = mine.filter(v => v.item.category==='armor' && normalizeSlotForLimits(v.item.slot)===s).length
-    if (countOther >= 1) return { ok:false, reason:`Limit 1 ${labelSlot(s)} in ${labelModeLong(voteMode)}` }
+  // ---- Armor: 1 per slot per mode ----
+  if (item.category === 'armor') {
+    const s = slot
+    const countSame = mine.filter(v => v.item.category==='armor' && normalizeSlotForLimits(v.item.slot)===s).length
+    const limit = 1
+    if (countSame >= limit) return { ok:false, reason: `Limit ${limit} ${labelSlot(s)} in ${labelModeLong(voteMode)}` }
     return { ok:true }
   }
 
-  // ---- Accessories ----
-  if (isAccessory) {
-    const s = slot // 'ring','neck','earring','bracelet' expected
+  // ---- Accessories: Earrings = 2 per mode; others = 1 per mode ----
+  if (item.category === 'accessory') {
+    const s = slot
     const countSame = mine.filter(v => v.item.category==='accessory' && normalizeSlotForLimits(v.item.slot)===s).length
-    const limit = (s === 'ring' && voteMode !== 'offspec') ? 2 : 1
+    const limit = (s === 'earring') ? 2 : 1
     if (countSame >= limit) {
       return { ok:false, reason: `Limit ${limit} ${labelSlot(s)}${limit>1?'s':''} in ${labelModeLong(voteMode)}` }
     }
@@ -341,6 +326,7 @@ async function checkVoteAllowedByMode(poll, user_id, item, voteMode) {
 
   return { ok:true }
 }
+
 
 
 
@@ -412,7 +398,7 @@ async function resolvePoll(guildId, idOrName) {
 }
 
 function pollEmbed(poll, items) {
-  const title = `Loot Poll: ${poll.name} — ${labelType(poll.type)} • ${labelMode(poll.mode)} ${poll.is_open ? '' : '(closed)'}`
+  const title = `Loot Poll: ${poll.name} — ${labelType(poll.type)} ${poll.is_open ? '' : '(closed)'}`
   const fields = []
   for (const cat of CATS) {
     const group = items.filter(i=>i.category===cat)
@@ -715,12 +701,13 @@ async function buildResultsEmbed(poll, { includeVoters = false, voterLimit = 10,
     fields.push({ name: 'No items have votes yet', value: 'Use `/poll add` or `/poll preset` to add loot.', inline: false })
   }
 
-  const title = `Results: ${poll.name} — ${labelType(poll.type)} • ${labelMode(poll.mode)} ${poll.is_open ? '' : '(closed)'}`
+  const title = `Results: ${poll.name} — ${labelType(poll.type)} ${poll.is_open ? '' : '(closed)'}`
   const desc = [
     poll.expires_at ? `Expires: <t:${Math.floor(poll.expires_at / 1000)}:R>` : 'No expiry',
     `Total votes: **${total}**`,
     `Poll ID: ${poll.id}`
   ].join(' • ')
+
 
   return new EmbedBuilder()
     .setTitle(title)
@@ -729,12 +716,7 @@ async function buildResultsEmbed(poll, { includeVoters = false, voterLimit = 10,
 }
 
 function chooseResultsChannel(inter, poll, explicitChannel = null) {
-  if (explicitChannel) return explicitChannel
-  const wantName = poll.mode === 'main_pvp' ? MAIN_PVP_CHANNEL : OFF_BUILD_CHANNEL
-  const byName = inter.guild.channels.cache.find(
-    ch => ch.type === ChannelType.GuildText && ch.name === wantName
-  )
-  return byName || inter.channel
+  return explicitChannel || inter.channel
 }
 
 // --- Admin helpers ---
@@ -744,19 +726,41 @@ function itemLabel(i) {
 }
 
 async function aggregateVotesAcrossGuildForItemByMode(guild_id, item_name_lc, mode) {
-  const polls = await pollsRepo.listPolls(guild_id)
-  const scope = polls.filter(p => p.mode === mode) // include open & closed
-  const out = []
+  const polls = await pollsRepo.listPolls(guild_id) // open & closed
+  const votes = await readSheet(SHEET_VOTES)
+  const vm = idxMap(votes.header)
 
-  for (const p of scope) {
+  const out = []
+  for (const p of polls) {
     const items = await itemsRepo.getItems(p.id)
     const it = items.find(x => (x.name_lc || x.name?.toLowerCase()) === item_name_lc)
     if (!it) continue
-    const voters = await votesRepo.votersForItem(p.id, it.id) // [{id,name}]
+
+    // filter votes for this poll+item with requested mode
+    const rows = votes.rows.filter(r =>
+      parseInt(r[vm.get('poll_id')],10) === Number(p.id) &&
+      parseInt(r[vm.get('item_id')],10) === Number(it.id) &&
+      (!vm.has('mode') || r[vm.get('mode')] === mode)
+    )
+    if (!rows.length) continue
+
+    // unique voters
+    const seen = new Set()
+    const voters = []
+    for (const r of rows) {
+      const id = r[vm.get('user_id')]
+      if (seen.has(id)) continue
+      seen.add(id)
+      voters.push({
+        id,
+        name: vm.has('user_name') ? (r[vm.get('user_name')] || '') : ''
+      })
+    }
     if (voters.length) out.push({ poll: p, item: it, voters })
   }
   return out
 }
+
 
 function fmtVoter(v) {
   return v.name ? `${v.name} (<@${v.id}>)` : `<@${v.id}>`
@@ -788,11 +792,6 @@ const commands = [
         {name:'World Boss', value:'world_boss'},
         {name:'Archboss', value:'archboss'},
       ).setRequired(true))
-      .addStringOption(o=>o.setName('mode').setDescription('Mode').addChoices(
-        {name:'Main PvP', value:'main_pvp'},
-        {name:'Main PvE', value:'main_pve'},
-        {name:'Fun PvP', value:'offspec'},
-      ).setRequired(true))
       .addIntegerOption(o=>o.setName('expires_hours').setDescription('Auto-close after N hours'))
     )
     .addSubcommand(sc => sc
@@ -803,11 +802,6 @@ const commands = [
           ...SLOTS.map(s => ({ name: SLOT_LABELS[s] || s, value: s }))
         )
       )
-      .addStringOption(o => o.setName('mode').setDescription('Mode').addChoices(
-        {name:'Main PvP', value:'main_pvp'},
-        {name:'Main PvE', value:'main_pve'},
-        {name:'Fun PvP', value:'offspec'},
-      ).setRequired(true))
       .addIntegerOption(o => o.setName('expires_hours').setDescription('Auto-close after N hours'))
       .addStringOption(o => o.setName('name').setDescription('Poll name override (optional)'))
     )
@@ -840,11 +834,6 @@ const commands = [
       .addStringOption(o=>o.setName('type').setDescription('Boss type').addChoices(
         {name:'World Boss', value:'world_boss'},
         {name:'Archboss', value:'archboss'},
-      ).setRequired(true))
-      .addStringOption(o=>o.setName('mode').setDescription('Mode').addChoices(
-        {name:'Main PvP', value:'main_pvp'},
-        {name:'Main PvE', value:'main_pve'},
-        {name:'Fun PvP', value:'offspec'},
       ).setRequired(true))
       .addStringOption(o=>o.setName('name').setDescription('Poll name override (optional)'))
       .addIntegerOption(o=>o.setName('expires_hours').setDescription('Auto-close after N hours'))
@@ -1009,6 +998,8 @@ try {
       if (interaction.customId.startsWith('council:close:')) return handleCouncilClose(interaction)
       if (interaction.customId.startsWith('vote-mode-add:'))  return handleVoteModeAdd(interaction)
       if (interaction.customId.startsWith('vote-mode-remove:')) return handleVoteModeRemove(interaction)
+      if (interaction.customId.startsWith('vote-mode-replace:')) return handleVoteModeReplace(interaction)
+      if (interaction.customId === 'vote-mode-cancel') return handleVoteModeCancel(interaction)
     }
 
     if (interaction.isStringSelectMenu()) {
@@ -1207,30 +1198,31 @@ async function handlePoll(inter) {
   if (!guildId) return inter.reply({ content: 'Guild-only command.', flags: MessageFlags.Ephemeral })
 
   if (sub === 'create') {
-    const name = inter.options.getString('name', true).trim()
-    const type = inter.options.getString('type', true)
-    const mode = inter.options.getString('mode', true)
-    const expiresHours = inter.options.getInteger('expires_hours')
-    if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create polls.', flags: MessageFlags.Ephemeral })
-    if (!TYPES.includes(type) || !MODES.includes(mode)) return inter.reply({ content: 'Invalid type or mode.', flags: MessageFlags.Ephemeral })
+  const name = inter.options.getString('name', true).trim()
+  const type = inter.options.getString('type', true)
+  const expiresHours = inter.options.getInteger('expires_hours')
+  if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create polls.', flags: MessageFlags.Ephemeral })
+  if (!TYPES.includes(type)) return inter.reply({ content: 'Invalid type.', flags: MessageFlags.Ephemeral })
 
-    let expires = null
-    if (expiresHours && expiresHours > 0) expires = Date.now() + (expiresHours * 3600 * 1000)
+  let expires = null
+  if (expiresHours && expiresHours > 0) expires = Date.now() + (expiresHours * 3600 * 1000)
 
-    const exists = await pollsRepo.getPollByName(guildId, name)
-    if (exists) return inter.reply({ content: 'A poll with that name already exists.', flags: MessageFlags.Ephemeral })
+  const exists = await pollsRepo.getPollByName(guildId, name)
+  if (exists) return inter.reply({ content: 'A poll with that name already exists.', flags: MessageFlags.Ephemeral })
 
-    const poll = await pollsRepo.createPoll({ guild_id: guildId, name, expires_at: expires, type, mode })
-    await inter.reply({ content: `Created poll **${poll.name}** (ID ${poll.id}).` })
-    await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
+  // pass a neutral mode string for backward-compat storage; it is not shown/used
+  const poll = await pollsRepo.createPoll({ guild_id: guildId, name, expires_at: expires, type, mode: 'all' })
+  await inter.reply({ content: `Created poll **${poll.name}** (ID ${poll.id}).` })
+  await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
+
   } else if (sub === 'repost') {
-  const idOrName = inter.options.getString('poll', true)
-  const poll = await resolvePoll(guildId, idOrName)
-  if (!poll) return inter.reply({ content: 'Poll not found.', flags: MessageFlags.Ephemeral })
+    const idOrName = inter.options.getString('poll', true)
+    const poll = await resolvePoll(guildId, idOrName)
+    if (!poll) return inter.reply({ content: 'Poll not found.', flags: MessageFlags.Ephemeral })
 
-  const chan = getPollChannel(inter.guild) || inter.channel
-  await upsertPollMessage(chan, poll)
-  return inter.reply({ content: `Reposted **${poll.name}** to ${chan}.`, flags: MessageFlags.Ephemeral })
+    const chan = getPollChannel(inter.guild) || inter.channel
+    await upsertPollMessage(chan, poll)
+    return inter.reply({ content: `Reposted **${poll.name}** to ${chan}.`, flags: MessageFlags.Ephemeral })
   } else if (sub === 'add') {
     const idOrName = inter.options.getString('poll', true)
     const itemName = inter.options.getString('item', true).trim()
@@ -1249,25 +1241,23 @@ async function handlePoll(inter) {
     await itemsRepo.upsertItem(poll.id, itemName, category, slot)
     await inter.reply({ content: `Added **${itemName}** (${labelCat(category)}${slot?` • ${slot}`:''}) to **${poll.name}**.` })
     await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
-  }
-  else if (sub === 'preset') {
+  } else if (sub === 'preset') {
     if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create presets.', flags: MessageFlags.Ephemeral })
     const boss = inter.options.getString('boss', true)
     const type = inter.options.getString('type', true)
-    const mode = inter.options.getString('mode', true)
     const nameOverride = inter.options.getString('name')
     const expiresHours = inter.options.getInteger('expires_hours')
 
-    if (!TYPES.includes(type) || !MODES.includes(mode)) return inter.reply({ content: 'Invalid type or mode.', flags: MessageFlags.Ephemeral })
+    if (!TYPES.includes(type)) return inter.reply({ content: 'Invalid type.', flags: MessageFlags.Ephemeral })
 
-    const pollName = nameOverride || `${boss} — ${labelType(type)} • ${labelMode(mode)}`
+    const pollName = nameOverride || `${boss} — ${labelType(type)}`
     const exists = await pollsRepo.getPollByName(guildId, pollName)
     if (exists) return inter.reply({ content: 'A poll with that name already exists.', flags: MessageFlags.Ephemeral })
 
     let expires = null
     if (expiresHours && expiresHours > 0) expires = Date.now() + (expiresHours * 3600 * 1000)
 
-    const poll = await pollsRepo.createPoll({ guild_id: guildId, name: pollName, expires_at: expires, type, mode })
+    const poll = await pollsRepo.createPoll({ guild_id: guildId, name: pollName, expires_at: expires, type, mode: 'all' })
     const rows = await loadPresetItems({ boss, type })
     if (!rows.length) {
       await inter.reply({ content: `Created **${poll.name}** but found no preset rows for boss "${boss}" (${labelType(type)}). Add rows to the Presets tab.`, flags: MessageFlags.Ephemeral })
@@ -1276,18 +1266,22 @@ async function handlePoll(inter) {
     }
     for (const r of rows) {
       if (!CATS.includes(r.category)) continue
-      const slot = (r.slot||'')
-      await itemsRepo.upsertItem(poll.id, r.item, r.category, slot)
+      await itemsRepo.upsertItem(poll.id, r.item, r.category, (r.slot||''))
     }
     await inter.reply({ content: `Created poll **${poll.name}** with ${rows.length} preset item(s).` })
     await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
   }
+
+
   else if (sub === 'list') {
     const rows = await pollsRepo.listPolls(guildId)
     if (!rows.length) return inter.reply({ content: 'No polls yet.' })
-    const lines = rows.map(p => `• **${p.name}** (ID ${p.id}) — ${labelType(p.type)} • ${labelMode(p.mode)} — ${p.is_open? 'open':'closed'}${p.expires_at ? ` — expires <t:${Math.floor(p.expires_at/1000)}:R>`:''}`)
+    const lines = rows.map(p =>
+      `• **${p.name}** (ID ${p.id}) — ${labelType(p.type)} — ${p.is_open? 'open':'closed'}${p.expires_at ? ` — expires <t:${Math.floor(p.expires_at/1000)}:R>`:''}`
+    )
     return inter.reply({ content: lines.join('\n') })
-  }else if (sub === 'results') {
+  }
+else if (sub === 'results') {
   const idOrName = inter.options.getString('poll', true)
   const targetChannel = inter.options.getChannel('channel') || inter.channel
   const includeVoters = inter.options.getBoolean('voters') || false
@@ -1344,15 +1338,15 @@ async function handlePoll(inter) {
   }
 
   const embed = new EmbedBuilder()
-    .setTitle(`Results — ${poll.name} (${labelMode(poll.mode)})`)
+    .setTitle(`Results — ${poll.name}`)
     .setDescription(poll.expires_at ? `Status: ${poll.is_open ? 'Open' : 'Closed'} • Expires: <t:${Math.floor(poll.expires_at/1000)}:R>` : `Status: ${poll.is_open ? 'Open' : 'Closed'}`)
     .addFields(fields)
     .setFooter({ text: `Poll ID: ${poll.id}` })
 
   // If embed too long, attach txt
-  const asText = ['Poll:', poll.name, `Mode: ${labelMode(poll.mode)}`, ''].concat(
-    fields.map(f => `${f.name}\n${f.value}`)
-  ).join('\n')
+  const asText = ['Poll:', poll.name, '']
+    .concat(fields.map(f => `${f.name}\n${f.value}`))
+    .join('\n')
   if (asText.length > 5800) {
     const buf = Buffer.from(asText, 'utf8')
     await targetChannel.send({
@@ -1368,11 +1362,11 @@ async function handlePoll(inter) {
   else if (sub === 'slot') {
     if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create polls.', flags: MessageFlags.Ephemeral });
     const slot = (inter.options.getString('slot', true) || '').toLowerCase();
-    const mode = inter.options.getString('mode', true);
     const expiresHours = inter.options.getInteger('expires_hours');
     const nameOverride = inter.options.getString('name');
     const rows = await loadPresetItemsBySlot(slot);
     if (!rows.length) return inter.reply({ content: `No preset rows found for slot "${slot}".`, flags: MessageFlags.Ephemeral });
+
     const uniq = [];
     const seen = new Set();
     for (const r of rows) {
@@ -1382,31 +1376,31 @@ async function handlePoll(inter) {
       uniq.push(r);
     }
 
-    // Build poll
     let expires = null;
     if (expiresHours && expiresHours > 0) expires = Date.now() + (expiresHours * 3600 * 1000);
 
-    const pollName = nameOverride || `${labelSlot(slot)} — ${labelMode(mode)}`;
+    const pollName = nameOverride || `${labelSlot(slot)}`;
     const exists = await pollsRepo.getPollByName(guildId, pollName);
     if (exists) return inter.reply({ content: `Poll "${pollName}" already exists.`, flags: MessageFlags.Ephemeral });
 
-    // Use "mixed" for type label since this spans multiple bosses/types
+    // "mixed" type fits since it spans bosses; keep mode:'all' for storage compatibility
     const poll = await pollsRepo.createPoll({
       guild_id: inter.guildId,
       name: pollName,
       expires_at: expires,
       type: 'mixed',
-      mode
+      mode: 'all'
     });
 
     for (const r of uniq) {
-      if (!CATS.includes(r.category)) continue; // guard
+      if (!CATS.includes(r.category)) continue;
       await itemsRepo.upsertItem(poll.id, r.item, r.category, r.slot || '');
     }
 
     await inter.reply({ content: `Created **${poll.name}** with ${uniq.length} item(s) for slot **${labelSlot(slot)}**.` });
     await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll);
   }
+
   else if (sub === 'close') {
     const idOrName = inter.options.getString('poll', true)
     const poll = await resolvePoll(guildId, idOrName)
@@ -1540,7 +1534,11 @@ async function handleVoteModeAdd(inter) {
   if (!item) return inter.reply({ content: 'Item not found.', flags: MessageFlags.Ephemeral })
 
   const gate = await checkVoteAllowedByMode(poll, inter.user.id, item, mode)
-  if (!gate.ok) return inter.reply({ content: `Cannot vote: ${gate.reason}`, flags: MessageFlags.Ephemeral })
+
+  if (!gate.ok) {
+    // NEW: show replacement options for this bucket
+    return presentReplacementPrompt(inter, { poll, newItem: item, mode, reason: gate.reason })
+  }
 
   await votesRepo.voteWithMode(poll.id, item.id, inter.user.id, niceName(inter), mode)
   await inter.reply({ content: `Voted for **${item.name}** — ${labelModeLong(mode)}.`, flags: MessageFlags.Ephemeral })
@@ -1565,6 +1563,100 @@ async function handleVoteModeRemove(inter) {
 
   const chan = getPollChannel(inter.guild) || inter.channel
   await upsertPollMessage(chan, poll)
+}
+
+async function presentReplacementPrompt(inter, { poll, newItem, mode, reason }) {
+  const mine = await getUserVotesAcrossGuildByMode(poll.guild_id, inter.user.id, mode, { onlyOpen: true })
+  const slot = normalizeSlotForLimits(newItem.slot || '')
+
+  let bucketName = ''
+  let current = []
+
+  if (newItem.category === 'weapon') {
+    bucketName = `${labelMode(mode)} weapons`
+    current = mine.filter(v => v.item.category === 'weapon')
+  } else if (newItem.category === 'accessory' && slot === 'earring') {
+    bucketName = `${labelMode(mode)} earrings`
+    current = mine.filter(v => v.item.category === 'accessory' && normalizeSlotForLimits(v.item.slot) === 'earring')
+  } else if (newItem.category === 'armor') {
+    bucketName = `${labelMode(mode)} ${labelSlot(slot)}`
+    current = mine.filter(v => v.item.category === 'armor' && normalizeSlotForLimits(v.item.slot) === slot)
+  } else if (newItem.category === 'accessory') {
+    bucketName = `${labelMode(mode)} ${labelSlot(slot)}`
+    current = mine.filter(v => v.item.category === 'accessory' && normalizeSlotForLimits(v.item.slot) === slot)
+  } else {
+    bucketName = `${labelMode(mode)}`
+    current = mine
+  }
+
+  if (!current.length) {
+    return inter.reply({ content: reason || 'You have reached the limit.', flags: MessageFlags.Ephemeral })
+  }
+
+  // Build "Replace" buttons (<= 5 per row)
+  const rows = []
+  for (let i=0; i<current.length; i+=5) {
+    const slice = current.slice(i, i+5)
+    rows.push(new ActionRowBuilder().addComponents(
+      ...slice.map(({poll:oldPoll, item:oldItem}) =>
+        new ButtonBuilder()
+          .setCustomId(`vote-mode-replace:${oldPoll.id}:${oldItem.id}:${mode}:${poll.id}:${newItem.id}`)
+          .setLabel(`Replace ${oldItem.name}`)
+          .setStyle(ButtonStyle.Primary)
+      )
+    ))
+  }
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('vote-mode-cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+  ))
+
+  const listing = current.map(({poll:pp, item:ii}) => `• **${ii.name}** — in poll *${pp.name}*`).join('\n')
+
+  return inter.reply({
+    content: `You have reached the limit for **${bucketName}**.\nChoose one to replace with **${newItem.name}**:\n\n${listing}`,
+    components: rows,
+    flags: MessageFlags.Ephemeral
+  })
+}
+
+async function handleVoteModeReplace(inter) {
+  const [, , oldPollIdStr, oldItemIdStr, mode, newPollIdStr, newItemIdStr] = inter.customId.split(':')
+  const oldPollId = Number(oldPollIdStr)
+  const newPollId = Number(newPollIdStr)
+  const oldItemId = Number(oldItemIdStr)
+  const newItemId = Number(newItemIdStr)
+
+  const oldPoll = await pollsRepo.getPollById(oldPollId)
+  const newPoll = await pollsRepo.getPollById(newPollId)
+  if (!oldPoll || !newPoll) return inter.update({ content:'Poll not found.', components: [] })
+
+  const oldItem = (await itemsRepo.getItems(oldPollId)).find(i => i.id === oldItemId)
+  const newItem = (await itemsRepo.getItems(newPollId)).find(i => i.id === newItemId)
+  if (!oldItem || !newItem) return inter.update({ content:'Item not found.', components: [] })
+
+  // Remove old vote (mode) then add new
+  await votesRepo.removeVoteForUserItemMode(oldPollId, oldItemId, inter.user.id, mode)
+
+  // Re-check gate after removing one
+  const gate = await checkVoteAllowedByMode(newPoll, inter.user.id, newItem, mode)
+  if (!gate.ok) {
+    return inter.update({ content:`Could not add new vote: ${gate.reason}`, components: [] })
+  }
+
+  await votesRepo.voteWithMode(newPollId, newItemId, inter.user.id, niceName(inter), mode)
+
+  const chan = getPollChannel(inter.guild) || inter.channel
+  await upsertPollMessage(chan, oldPoll)
+  if (newPollId !== oldPollId) await upsertPollMessage(chan, newPoll)
+
+  return inter.update({
+    content:`Replaced your **${labelModeLong(mode)}** vote: **${oldItem.name}** → **${newItem.name}**.`,
+    components: []
+  })
+}
+
+async function handleVoteModeCancel(inter) {
+  return inter.update({ content: 'Cancelled.', components: [] })
 }
 
 

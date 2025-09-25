@@ -888,6 +888,22 @@ const commands = [
       .setDescription('Create missing polls for every slot from presets')
       .addIntegerOption(o => o.setName('expires_hours').setDescription('Auto-close after N hours'))
     )
+     .addSubcommand(sc => sc
+      .setName('sync_slot')
+      .setDescription('Add any missing Presets items for a slot to its existing poll')
+      .addStringOption(o =>
+         o.setName('slot').setDescription('Slot code, e.g. earring, ring, gs').setRequired(true)
+          .addChoices(...SLOTS.map(s => ({ name: SLOT_LABELS[s] || s, value: s })))
+      )
+      .addBooleanOption(o =>
+         o.setName('create_if_missing').setDescription('Create the slot poll if not found (default: false)'))
+    )
+    .addSubcommand(sc => sc
+      .setName('sync_all_slots')
+      .setDescription('Add any missing Presets items for all slots to their existing polls')
+      .addBooleanOption(o =>
+         o.setName('create_if_missing').setDescription('Create missing slot polls (default: false)'))
+    )
     .setDMPermission(false),
 
   new SlashCommandBuilder()
@@ -1397,16 +1413,164 @@ async function handlePoll(inter) {
     await inter.reply({ content: `Closed poll **${poll.name}**.`, flags: MessageFlags.Ephemeral })
     await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, updated)
   }
+// /poll sync_slot
+else if (sub === 'sync_slot') {
+  if (!isAdmin(inter.member)) {
+    return inter.reply({ content: 'Only admins can sync from Presets.', flags: MessageFlags.Ephemeral });
+  }
+  try { await inter.deferReply({ ephemeral: true }) } catch {}
 
+  const slot = (inter.options.getString('slot', true) || '').toLowerCase();
+  const createIfMissing = inter.options.getBoolean('create_if_missing') || false;
+  const pollName = labelSlot(slot);                 // e.g. 'Helmet', 'Ring', 'Crossbow'
+  const slotKey = normalizeSlotCode(slot);          // e.g. 'helmet', 'ring', 'xb'
+
+  // Load Presets for this slot
+  const rows = await loadPresetItemsBySlot(slot);   // already normalizes row slot
+  if (!rows.length) {
+    return inter.editReply({ content: `No Presets found for slot **${labelSlot(slot)}**.` });
+  }
+  const uniq = uniqueByKey(rows, r =>
+    `${(r.item || '').toLowerCase()}|${(r.category || '').toLowerCase()}|${normalizeSlotCode(r.slot || '')}`
+  );
+
+  // Find (or create) the slot poll
+  let poll = await pollsRepo.getPollByName(inter.guildId, pollName);
+  if (!poll) {
+    if (!createIfMissing) {
+      return inter.editReply({ content: `Poll **${pollName}** does not exist. Create it with /poll slot or set create_if_missing:true.` });
+    }
+    poll = await pollsRepo.createPoll({
+      guild_id: inter.guildId, name: pollName, expires_at: null, type: 'mixed', mode: 'all'
+    });
+  }
+  if (!poll.is_open) {
+    return inter.editReply({ content: `Poll **${poll.name}** is closed.` });
+  }
+
+  // Build existing item signature set
+  const current = await itemsRepo.getItems(poll.id);
+  const have = new Set(current.map(i =>
+    `${(i.name_lc || i.name || '').toLowerCase().trim()}|${(i.category || '').toLowerCase()}|${normalizeSlotCode(i.slot || '')}`
+  ));
+
+  // Add only missing items
+  let added = 0;
+  for (const r of uniq) {
+    if (!CATS.includes(r.category)) continue;
+    const key = `${(r.item || '').toLowerCase()}|${(r.category || '').toLowerCase()}|${normalizeSlotCode(r.slot || '')}`;
+    if (have.has(key)) continue;
+    await itemsRepo.upsertItem(poll.id, r.item, r.category, r.slot || '');
+    added++;
+  }
+
+  const chan = getPollChannel(inter.guild) || inter.channel;
+  await upsertPollMessage(chan, poll);  // one batched count read
+
+  return inter.editReply({
+    content: added
+      ? `Synced **${poll.name}** — added **${added}** new item(s) from Presets.`
+      : `Synced **${poll.name}** — no new items found (already up to date).`
+  });
+}
+
+  // /poll sync_all_slots
+  else if (sub === 'sync_all_slots') {
+    if (!isAdmin(inter.member)) {
+      return inter.reply({ content: 'Only admins can sync from Presets.', flags: MessageFlags.Ephemeral });
+    }
+    try { await inter.deferReply({ ephemeral: true }) } catch {}
+
+    const createIfMissing = inter.options.getBoolean('create_if_missing') || false;
+    const chan = getPollChannel(inter.guild) || inter.channel;
+
+    // Read existing polls once
+    const existing = await pollsRepo.listPolls(inter.guildId);
+    const byName = new Map(existing.map(p => [(p.name || '').toLowerCase().trim(), p]));
+
+    // Read Presets once and bucket by normalized slot
+    const presetSheet = await readSheet(SHEET_PRESETS);
+    const pm = idxMap(presetSheet.header);
+    const bySlot = new Map(); // slot -> rows[]
+    for (const r of presetSheet.rows) {
+      if (!r?.length) continue;
+      const slot = normalizeSlotCode((r[pm.get('slot')] || '').trim().toLowerCase());
+      const category = (r[pm.get('category')] || '').trim().toLowerCase();
+      const item = (r[pm.get('item')] || '').trim();
+      if (!slot || !category || !item || !SLOT_DOMAIN[category]?.has(slot)) continue;
+      const row = { item, category, slot };
+      if (!bySlot.has(slot)) bySlot.set(slot, []);
+      bySlot.get(slot).push(row);
+    }
+
+    const updated = [];
+    const created = [];
+    const skipped = [];
+    const noPreset = [];
+
+    for (const rawSlot of SLOTS) {
+      const slotKey = normalizeSlotCode(rawSlot);     // normalized for Presets
+      const pollName = labelSlot(rawSlot);           // human label for the poll name
+      const rows = bySlot.get(slotKey) || [];
+      if (!rows.length) { noPreset.push(pollName); continue; }
+
+      let poll = byName.get(pollName.toLowerCase());
+      if (!poll) {
+        if (!createIfMissing) { skipped.push(`${pollName} (missing)`); continue; }
+        poll = await pollsRepo.createPoll({
+          guild_id: inter.guildId, name: pollName, expires_at: null, type: 'mixed', mode: 'all'
+        });
+        byName.set(pollName.toLowerCase(), poll);
+        created.push(pollName);
+      }
+      if (!poll.is_open) { skipped.push(`${pollName} (closed)`); continue; }
+
+      const uniq = uniqueByKey(rows, r =>
+        `${(r.item || '').toLowerCase()}|${(r.category || '').toLowerCase()}|${normalizeSlotCode(r.slot || '')}`
+      );
+
+      const current = await itemsRepo.getItems(poll.id);
+      const have = new Set(current.map(i =>
+        `${(i.name_lc || i.name || '').toLowerCase().trim()}|${(i.category || '').toLowerCase()}|${normalizeSlotCode(i.slot || '')}`
+      ));
+
+      let added = 0;
+      for (const r of uniq) {
+        if (!CATS.includes(r.category)) continue;
+        const key = `${(r.item || '').toLowerCase()}|${(r.category || '').toLowerCase()}|${normalizeSlotCode(r.slot || '')}`;
+        if (have.has(key)) continue;
+        await itemsRepo.upsertItem(poll.id, r.item, r.category, r.slot || '');
+        added++;
+      }
+
+      if (added > 0) {
+        await upsertPollMessage(chan, poll);
+        updated.push(`${pollName} (+${added})`);
+      } else {
+        skipped.push(`${pollName} (no change)`);
+      }
+      await sleep(125); // gentle on Sheets/Discord
+    }
+
+    const parts = [];
+    if (created.length) parts.push(`**Created**: ${created.join(', ')}`);
+    if (updated.length) parts.push(`**Updated**: ${updated.join(', ')}`);
+    if (skipped.length) parts.push(`**Skipped**: ${skipped.join(', ')}`);
+    if (noPreset.length) parts.push(`**No Presets**: ${noPreset.join(', ')}`);
+
+    return inter.editReply({
+      content: parts.length ? parts.join('\n') : 'Nothing to sync.'
+    });
+  }
   else if (sub === 'auto_slots') {
     if (!isAdmin(inter.member)) {
        return inter.reply({ content: 'Only admins can create polls.', flags: MessageFlags.Ephemeral });
      }
-     try { await inter.deferReply({ ephemeral: true }) } catch {}
+     try { await inter.deferReply({ flags: MessageFlags.Ephemeral }) } catch {}
  
      const expiresHours = inter.options.getInteger('expires_hours');
      const expires = (expiresHours && expiresHours > 0)
-       ? Date.now()   (expiresHours * 3600 * 1000)
+       ? Date.now() + (expiresHours * 3600 * 1000)
        : null;
  
      const chan = getPollChannel(inter.guild) || inter.channel;
@@ -1607,7 +1771,7 @@ async function handleVoteButton(inter) {
 }
 
 async function handleVoteModeAdd(inter) {
-  try { await inter.deferReply({ ephemeral: true }) } catch {}
+  try { await inter.deferReply({ flags: MessageFlags.Ephemeral }) } catch {}
   const [, pollIdStr, itemIdStr, mode] = inter.customId.split(':') // vote-mode-add:<pollId>:<itemId>:<mode>
   const pollId = Number(pollIdStr)
   const itemId = Number(itemIdStr)
@@ -1631,7 +1795,7 @@ async function handleVoteModeAdd(inter) {
 }
 
 async function handleVoteModeRemove(inter) {
-  try { await inter.deferReply({ ephemeral: true }) } catch {}
+  try { await inter.deferReply({ flags: MessageFlags.Ephemeral }) } catch {}
   const [, pollIdStr, itemIdStr, mode] = inter.customId.split(':') // vote-mode-remove:<pollId>:<itemId>:<mode>
   const pollId = Number(pollIdStr)
   const itemId = Number(itemIdStr)
@@ -1760,16 +1924,21 @@ async function getPollIdForItem(itemId){
 }
 
 async function handleAdminPanel(inter) {
-  const parts = inter.customId.split(':'); // admin:panel:<pollId>
-  const pollId = Number(parts[2]);
-  const poll = await pollsRepo.getPollById(pollId);
+  const [ , action, pollIdStr ] = inter.customId.split(':'); // admin:panel:<id> OR admin:back:<id>
+  const pollId = Number(pollIdStr);
 
-  if (!isAdmin(inter.member)) {
-    return inter.reply({ content: 'Admin only.', flags: MessageFlags.Ephemeral });
+  // ACK FIRST
+  if (action === 'panel') {
+    // Coming from a public message → open a new ephemeral reply
+    try { await inter.deferReply({ ephemeral: true }) } catch {}
+  } else {
+    // Coming from the ephemeral panel → update it in place
+    try { await inter.deferUpdate() } catch {}
   }
-  if (!poll) {
-    return inter.reply({ content: 'Poll not found for this admin panel.', flags: MessageFlags.Ephemeral });
-  }
+  const poll = await pollsRepo.getPollById(pollId);
+  if (!isAdmin(inter.member))  return inter.editReply({ content:'Admin only.', components: [], embeds: [] })
+  if (!poll)                    return inter.editReply({ content:'Poll not found for this admin panel.', components: [], embeds: [] })
+ 
 
   const items = await itemsRepo.getItems(poll.id);
   const hasItems = items.length > 0;
@@ -1808,7 +1977,7 @@ async function handleAdminPanel(inter) {
     .setTitle(`Admin • ${poll.name}`)
     .setDescription('Select an item to view/modify voters, or use actions below.');
 
-  return inter.reply({ embeds:[embed], components:[row1, row2], flags: MessageFlags.Ephemeral });
+  return inter.editReply({ embeds:[embed], components:[row1, row2] });
 }
 
 
@@ -1833,9 +2002,10 @@ async function renderItemAdminView(inter, poll, item) {
 
   const content = `${header}\n\n${blocks.join('\n\n')}`;
 
-  // Build the voter picker from all voters (kept for quick removals)
+  // Build the voter picker from all voters (dedup! users can appear in multiple modes)
   const allVoters = MODES.flatMap(k => groups.get(k) || []).concat(unknown);
-  const hasVoters = allVoters.length > 0;
+  const uniqueVoters = uniqueByKey(allVoters, v => v.id);
+  const hasVoters = uniqueVoters.length > 0;
 
   const voterMenu = new StringSelectMenuBuilder()
     .setCustomId(`admin:pickvoter:${poll.id}:${item.id}`)
@@ -1846,7 +2016,7 @@ async function renderItemAdminView(inter, poll, item) {
 
   if (hasVoters) {
     voterMenu.addOptions(
-      ...allVoters.slice(0, 25).map(v =>
+      ...uniqueVoters.slice(0, 25).map(v =>
         new StringSelectMenuOptionBuilder()
           .setLabel(v.name || v.id)
           .setDescription(v.name ? v.id : 'remove vote')
@@ -1878,28 +2048,34 @@ async function renderItemAdminView(inter, poll, item) {
 
 
 async function handleAdminSelectItem(inter) {
-  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', flags: MessageFlags.Ephemeral })
+  // ACK FIRST (within 3s)
+  try { await inter.deferUpdate(); } catch {}
+
+  if (!isAdmin(inter.member)) {
+    return inter.editReply({ content:'Admin only.', components: [], embeds: [] })
+  }
   const [ , , pollIdStr ] = inter.customId.split(':') // admin:item:<pollId>
   const pollId = Number(pollIdStr)
   const itemId = Number(inter.values?.[0])
   const poll = await pollsRepo.getPollById(pollId)
-  if (!poll) return inter.reply({ content:'Poll not found.', flags: MessageFlags.Ephemeral })
+  
+  if (!poll) return inter.editReply({ content:'Poll not found.', components: [], embeds: [] })
   const item = (await itemsRepo.getItems(pollId)).find(i => i.id === itemId)
+  
   if (!item) return inter.reply({ content:'Item not found.', flags: MessageFlags.Ephemeral })
+  await inter.editReply({ content: 'Loading…', components: [], embeds: [] })
 
-  // show item admin view
-  return inter.editReply({ content: 'Loading…', components: [], embeds: [] })
-    .catch(()=>null)
-    .then(() => renderItemAdminView(inter, poll, item))
+  return renderItemAdminView(inter, poll, item);
 }
 
 async function handleAdminPickVoter(inter) {
-  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', flags: MessageFlags.Ephemeral })
+  try { await inter.deferUpdate(); } catch {}
+  if (!isAdmin(inter.member)) return inter.editReply({ content:'Admin only.', components: [], embeds: [] })
   const [ , , pollIdStr, itemIdStr ] = inter.customId.split(':') // admin:pickvoter:<pollId>:<itemId>
   const pollId = Number(pollIdStr)
   const itemId = Number(itemIdStr)
   const userId = inter.values?.[0]
-  if (!userId) return inter.reply({ content:'No user selected.', flags: MessageFlags.Ephemeral })
+  if (!userId) return inter.editReply({ content:'No user selected.', components: [], embeds: [] })
   const poll = await pollsRepo.getPollById(pollId)
   if (!poll) return inter.reply({ content:'Poll not found.', flags: MessageFlags.Ephemeral })
   const item = (await itemsRepo.getItems(pollId)).find(i => i.id === itemId)
@@ -1907,12 +2083,14 @@ async function handleAdminPickVoter(inter) {
 
   await votesRepo.removeVoteForUserItem(pollId, itemId, userId)
   await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
-  // re-render
+  
+  // re-render the same ephemeral panel
   return renderItemAdminView(inter, poll, item)
 }
 
 async function handleAdminClearItem(inter) {
-  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', flags: MessageFlags.Ephemeral })
+  try { await inter.deferUpdate(); } catch {}
+  if (!isAdmin(inter.member)) return inter.editReply({ content:'Admin only.', components: [], embeds: [] })
   const [ , , pollIdStr, itemIdStr ] = inter.customId.split(':') // admin:clearitem:<pollId>:<itemId>
   const pollId = Number(pollIdStr)
   const itemId = Number(itemIdStr)
@@ -1923,8 +2101,8 @@ async function handleAdminClearItem(inter) {
 
   const removed = await votesRepo.clearVotesForItem(pollId, itemId)
   await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
-  return renderItemAdminView(inter, poll, item)
-    .then(()=> inter.followUp({ content:`Cleared ${removed} vote(s) for **${itemLabel(item)}**.`, flags: MessageFlags.Ephemeral }))
+  await renderItemAdminView(inter, poll, item)
+  return inter.followUp({ content:`Cleared ${removed} vote(s) for **${itemLabel(item)}**.`, flags: MessageFlags.Ephemeral })
 }
 
 async function handleAdminClearPoll(inter) {
@@ -1997,7 +2175,8 @@ async function handleAdminDeleteConfirm(inter) {
 }
 
 async function handleAdminVotersPoll(inter) {
-  if (!isAdmin(inter.member)) return inter.reply({ content:'Admin only.', flags: MessageFlags.Ephemeral });
+  try { await inter.deferReply({ ephemeral: true }) } catch {}
+  if (!isAdmin(inter.member)) return inter.editReply({ content:'Admin only.' });  
   const pollId = Number(inter.customId.split(':')[2]); // admin:voterspoll:<pollId>
   const poll = await pollsRepo.getPollById(pollId);
   if (!poll) return inter.reply({ content:'Poll not found.', flags: MessageFlags.Ephemeral });
@@ -2026,13 +2205,13 @@ async function handleAdminVotersPoll(inter) {
 
   if (content.length > 1900) {
     const buf = Buffer.from(content, 'utf8');
-    return inter.reply({
+    return inter.editReply({
       content: `Voters for **${poll.name}** (attached).`,
       files: [{ attachment: buf, name: `voters-poll-${poll.id}.txt` }],
-      flags: MessageFlags.Ephemeral
     });
   }
-  return inter.reply({ content, flags: MessageFlags.Ephemeral });
+
+  return inter.editReply({ content });
 }
 
 async function handleAutocomplete(inter) {

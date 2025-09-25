@@ -33,7 +33,7 @@ process.on('warning', (warning) => {
 const DISCORD_USER_ID = process.env.DISCORD_USER_ID
 const TOKEN = process.env.DISCORD_BOT_TOKEN
 const CLIENT_ID = process.env.CLIENT_ID || process.env.DISCORD_CLIENT_ID
-const ADMIN_ROLE_NAME = process.env.LOOT_ADMIN_ROLE || 'Loot Admin'
+const ADMIN_ROLE_NAME = process.env.LOOT_ADMIN_ROLE || 'Loot Admin' || process.env.LOOT_ADMIN_ROLE_TEMP || process.env.LOOT_ADMIN_ROLE_TEMP2
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL
 const POLL_CHANNEL_ID   = process.env.MAIN_LOOT_POLL_CHANNEL_ID || ''
@@ -393,9 +393,10 @@ async function resolvePoll(guildId, idOrName) {
 }
 
 function pollEmbed(poll, items) {
-  const typeSuffix = poll.type === 'mixed' ? '' : ` — ${labelType(poll.type)}`
+  const typeSuffix   = poll.type === 'mixed' ? '' : ` — ${labelType(poll.type)}`
   const closedSuffix = poll.is_open ? '' : ' (closed)'
-  const title = `Loot Poll: ${poll.name}${typeSuffix}${closedSuffix}`
+  const title = `${poll.name}${typeSuffix}${closedSuffix}`   // ← no "Loot Poll:" prefix
+
   const fields = []
   for (const cat of CATS) {
     const group = items.filter(i=>i.category===cat)
@@ -403,13 +404,23 @@ function pollEmbed(poll, items) {
     const lines = group.map(it => `• ${it.name}${it.slot?` (${it.slot})`:''} — ${it._count} vote${it._count===1?'':'s'}`)
     fields.push({ name: labelCat(cat), value: lines.join('\n'), inline: true })
   }
-  if (!fields.length) fields.push({ name: 'No items yet', value: 'Use /poll add or /poll preset to add loot.' })
-  return new EmbedBuilder()
+  if (!fields.length) {
+    fields.push({ name: 'No items yet', value: 'Use /poll add or /poll preset to add loot.' })
+  }
+
+  const embed = new EmbedBuilder()
     .setTitle(title)
-    .setDescription(poll.expires_at ? `Expires: <t:${Math.floor(poll.expires_at/1000)}:R>` : 'No expiry')
     .addFields(fields)
     .setFooter({ text: `Poll ID: ${poll.id}` })
+
+  // Only show an expiry line when there IS an expiry
+  if (poll.expires_at) {
+    embed.setDescription(`Expires: <t:${Math.floor(poll.expires_at/1000)}:R>`)
+  }
+
+  return embed
 }
+
 
 function labelCat(c){ return c==='weapon' ? 'Weapons' : c==='armor' ? 'Armor' : 'Accessories' }
 function chunk(arr, n){ const out=[]; for(let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out }
@@ -432,11 +443,16 @@ function buildButtons(items, poll) {
   }
   rows.push(new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`admin:panel:${poll.id}`)   // include poll id
+      .setCustomId(`admin:panel:${poll.id}`)
       .setLabel('Admin Panel')
-      .setStyle(ButtonStyle.Danger)
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId(`user:votes:${poll.id}`)
+      .setLabel('My Votes')
+      .setStyle(ButtonStyle.Secondary)
   ))
   return rows
+
 }
 
 
@@ -707,20 +723,120 @@ async function buildResultsEmbed(poll, { includeVoters = false, voterLimit = 10,
   const typeSuffix = poll.type === 'mixed' ? '' : ` — ${labelType(poll.type)}`
   const closedSuffix = poll.is_open ? '' : ' (closed)'
   const title = `Results: ${poll.name}${typeSuffix}${closedSuffix}`
-  const desc = [
-    poll.expires_at ? `Expires: <t:${Math.floor(poll.expires_at / 1000)}:R>` : 'No expiry',
-    `Total votes: **${total}**`,
-    `Poll ID: ${poll.id}`
-  ].join(' • ')
 
+    const descParts = []
+    if (poll.expires_at) {
+      descParts.push(`Expires: <t:${Math.floor(poll.expires_at / 1000)}:R>`)
+    }
+    descParts.push(`Total votes: **${total}**`, `Poll ID: ${poll.id}`)
 
-  return new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(desc)
-    .addFields(fields)
+    return new EmbedBuilder()
+      .setTitle(title)
+      .setDescription(descParts.join(' • '))
+      .addFields(fields)
 }
 
 // --- Admin helpers ---
+
+function nameKey(s) {
+  return (s || '')
+    .toLowerCase()
+    .normalize('NFKC')           // fold weird punctuation
+    .replace(/\u00a0/g, ' ')     // nbsp -> space
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+async function summarizeUserVotes(guildId, userId, { includeClosed = false } = {}) {
+  // Read guild polls once
+  const polls = await pollsRepo.listPolls(guildId);
+  const pollsById = new Map(polls.map(p => [Number(p.id), p]));
+
+  // Read the user's vote rows
+  const votesSheet = await readSheet(SHEET_VOTES);
+  const vm = idxMap(votesSheet.header);
+  const rows = votesSheet.rows.filter(r => {
+    if (r[vm.get('user_id')] !== userId) return false;
+    const pid = parseInt(r[vm.get('poll_id')], 10);
+    const poll = pollsById.get(pid);
+    if (!poll) return false;
+    if (!includeClosed && !poll.is_open) return false;
+    return true;
+  });
+
+  if (!rows.length) return { text: null };
+
+  // Read all items once; index by item id
+  const itemsSheet = await readSheet(SHEET_ITEMS);
+  const im = idxMap(itemsSheet.header);
+  const itemById = new Map(itemsSheet.rows.map(r => [
+    parseInt(r[im.get('id')], 10),
+    {
+      id: parseInt(r[im.get('id')], 10),
+      poll_id: parseInt(r[im.get('poll_id')], 10),
+      name: r[im.get('name')],
+      category: (r[im.get('category')] || '').toLowerCase(),
+      slot: (r[im.get('slot')] || '').toLowerCase(),
+    }
+  ]));
+
+  // Group by poll, aggregate modes per item
+  const perPoll = new Map(); // poll_id -> Map<item_id, Set<modes>>
+  for (const r of rows) {
+    const pid = parseInt(r[vm.get('poll_id')], 10);
+    const iid = parseInt(r[vm.get('item_id')], 10);
+    const mode = vm.has('mode') ? (r[vm.get('mode')] || 'unknown') : 'unknown';
+    if (!itemById.has(iid)) continue;
+
+    if (!perPoll.has(pid)) perPoll.set(pid, new Map());
+    const perItem = perPoll.get(pid);
+    if (!perItem.has(iid)) perItem.set(iid, new Set());
+    perItem.get(iid).add(mode);
+  }
+
+  // Build output
+  const lines = [];
+  const sortedPolls = Array.from(perPoll.keys())
+    .sort((a,b) => (pollsById.get(a)?.name || '').localeCompare(pollsById.get(b)?.name || ''));
+
+  for (const pid of sortedPolls) {
+    const poll = pollsById.get(pid);
+    const itemsMap = perPoll.get(pid);
+
+    const itemLines = [];
+    for (const [iid, modeSet] of Array.from(itemsMap.entries()).sort((a,b) => {
+      const ai = itemById.get(a[0]); const bi = itemById.get(b[0]);
+      return (ai?.category||'').localeCompare(bi?.category||'') || (ai?.name||'').localeCompare(bi?.name||'');
+    })) {
+      const it = itemById.get(iid);
+      const slot = it.slot ? ` (${it.slot})` : '';
+      const modes = Array.from(modeSet).filter(Boolean).map(labelModeLong);
+      const modeStr = modes.length ? ` — ${modes.join(', ')}` : '';
+      itemLines.push(`• ${labelCat(it.category)} • ${it.name}${slot}${modeStr}`);
+    }
+
+    lines.push(`**${poll.name}${poll.is_open ? '' : ' (closed)'}**\n${itemLines.join('\n')}`);
+  }
+
+  const uniqueCount = Array.from(perPoll.values()).reduce((sum, map) => sum + map.size, 0)
+  const header = `Your votes (open polls only) — **${uniqueCount}** total:`
+  return { text: [header, '', ...lines].join('\n') };
+}
+
+async function handleUserVotes(inter) {
+  try { await inter.deferReply({ ephemeral: true }) } catch {}
+  const { text } = await summarizeUserVotes(inter.guildId, inter.user.id, { includeClosed: false });
+  if (!text) return inter.editReply({ content: 'You have no votes in open polls.' });
+
+  if (text.length > 1900) {
+    const buf = Buffer.from(text, 'utf8');
+    return inter.editReply({
+      content: 'Your votes (attached).',
+      files: [{ attachment: buf, name: 'my-votes.txt' }],
+    });
+  }
+  return inter.editReply({ content: text });
+}
 
 function sleep(ms){ return new Promise(res => setTimeout(res, ms)); }
 function uniqueByKey(arr, keyFn) {
@@ -845,6 +961,10 @@ const commands = [
       )
       .addIntegerOption(o => o.setName('expires_hours').setDescription('Auto-close after N hours'))
       .addStringOption(o => o.setName('name').setDescription('Poll name override (optional)'))
+    )
+    .addSubcommand(sc => sc
+      .setName('refresh_all')
+      .setDescription('Re-render all poll messages (updates buttons without changing items)')
     )
     .addSubcommand(sc=> sc.setName('add').setDescription('Add an item to a poll')
       .addStringOption(o=>o.setName('poll').setDescription('Poll ID or name').setRequired(true))
@@ -1050,6 +1170,7 @@ try {
 
     if (interaction.isButton()) {
       if (interaction.customId.startsWith('vote:')) return handleVoteButton(interaction)
+      if (interaction.customId.startsWith('user:votes:')) return handleUserVotes(interaction)
       if (interaction.customId.startsWith('admin:panel:')) return handleAdminPanel(interaction)
       if (interaction.customId.startsWith('admin:voterspoll:')) return handleAdminVotersPoll(interaction)
       if (interaction.customId.startsWith('admin:clearitem:'))  return handleAdminClearItem(interaction)
@@ -1287,6 +1408,23 @@ async function handlePoll(inter) {
     const chan = getPollChannel(inter.guild) || inter.channel
     await upsertPollMessage(chan, poll)
     return inter.reply({ content: `Reposted **${poll.name}** to ${chan}.`, flags: MessageFlags.Ephemeral })
+  } else if (sub === 'refresh_all') {
+    if (!isAdmin(inter.member)) {
+      return inter.reply({ content: 'Only admins can refresh.', flags: MessageFlags.Ephemeral })
+    }
+    try { await inter.deferReply({ ephemeral: true }) } catch {}
+
+    const polls = await pollsRepo.listPolls(inter.guildId)
+    const chan = getPollChannel(inter.guild) || inter.channel
+    let updated = 0
+
+    for (const p of polls) {
+      await upsertPollMessage(chan, p)
+      updated++
+      await sleep(125) 
+    }
+
+    return inter.editReply({ content: `Refreshed **${updated}** poll message(s).` })
   } else if (sub === 'add') {
     const idOrName = inter.options.getString('poll', true)
     const itemName = inter.options.getString('item', true).trim()
@@ -1486,7 +1624,7 @@ else if (sub === 'sync_slot') {
 
     // Read existing polls once
     const existing = await pollsRepo.listPolls(inter.guildId);
-    const byName = new Map(existing.map(p => [(p.name || '').toLowerCase().trim(), p]));
+    const byName = new Map(existing.map(p => [nameKey(p.name), p]))
 
     // Read Presets once and bucket by normalized slot
     const presetSheet = await readSheet(SHEET_PRESETS);
@@ -1514,7 +1652,7 @@ else if (sub === 'sync_slot') {
       const rows = bySlot.get(slotKey) || [];
       if (!rows.length) { noPreset.push(pollName); continue; }
 
-      let poll = byName.get(pollName.toLowerCase());
+      let poll = byName.get(nameKey(pollName))
       if (!poll) {
         if (!createIfMissing) { skipped.push(`${pollName} (missing)`); continue; }
         poll = await pollsRepo.createPoll({
@@ -1929,16 +2067,24 @@ async function handleAdminPanel(inter) {
 
   // ACK FIRST
   if (action === 'panel') {
-    // Coming from a public message → open a new ephemeral reply
     try { await inter.deferReply({ ephemeral: true }) } catch {}
   } else {
-    // Coming from the ephemeral panel → update it in place
     try { await inter.deferUpdate() } catch {}
   }
+
   const poll = await pollsRepo.getPollById(pollId);
-  if (!isAdmin(inter.member))  return inter.editReply({ content:'Admin only.', components: [], embeds: [] })
-  if (!poll)                    return inter.editReply({ content:'Poll not found for this admin panel.', components: [], embeds: [] })
- 
+
+  // Non-admin? Show their votes instead of "Admin only."
+  if (!isAdmin(inter.member))  {
+    const { text } = await summarizeUserVotes(inter.guildId, inter.user.id, { includeClosed: false });
+    return inter.editReply({
+      content: text || 'You have no votes in open polls.',
+      components: [],
+      embeds: []
+    });
+  }
+
+  if (!poll) return inter.editReply({ content:'Poll not found for this admin panel.', components: [], embeds: [] });
 
   const items = await itemsRepo.getItems(poll.id);
   const hasItems = items.length > 0;

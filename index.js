@@ -12,7 +12,7 @@ import * as votesRepo from './src/data/votesRepo.js'
 import { sheets, readSheet, appendRows, overwriteRows, idxMap } from './src/infra/sheets.js'
 import {
   SHEET_POLLS, SHEET_ITEMS, SHEET_VOTES, SHEET_PRESETS,
-  SHEET_COUNCIL_POLLS, SHEET_COUNCIL_CAND, SHEET_COUNCIL_VOTES
+  SHEET_COUNCIL_POLLS, SHEET_COUNCIL_CAND, SHEET_COUNCIL_VOTES, SHEET_AUDIT
 } from './src/infra/constants.js';
 
 process.on('unhandledRejection', (reason, promise) => {
@@ -66,6 +66,7 @@ if (!TOKEN || !CLIENT_ID || !SPREADSHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_P
 async function ensureHeaders() {
   const headers = {
     [SHEET_POLLS]: ['id','guild_id','name','is_open','expires_at','type','mode'],
+    [SHEET_AUDIT]: ['ts','guild_id','action','actor_id','actor_name','poll_id','poll_name','details'],
     [SHEET_ITEMS]: ['id','poll_id','name','name_lc','category','slot'],
     [SHEET_VOTES]: ['poll_id','item_id','user_id','user_name','mode','created_at'],
     [SHEET_PRESETS]: ['boss','type','item','category','slot'],
@@ -113,7 +114,7 @@ const SLOTS = [
   "belt",
   "boots",
   "bracelet",
-  "cape",
+  "cloak",
   "chest",
   "dagger",
   "earring",
@@ -140,7 +141,7 @@ const SLOT_DOMAIN = {
 
 const SLOT_SYNONYMS = {
   head: 'helmet', helm: 'helmet', helmet: 'helmet',
-  cape: 'cloak', cloak: 'cloak',
+  cloak: 'cape', cape:'cloak', cloak: 'cloak',
   necklace: 'neck', neck: 'neck',
   earrings: 'earring',
   'sword & shield': 'sns', 'sword and shield': 'sns', sns: 'sns'
@@ -389,7 +390,15 @@ async function resolvePoll(guildId, idOrName) {
     const p = await pollsRepo.getPollById(byId)
     if (p && p.guild_id === guildId) return p
   }
-  return pollsRepo.getPollByName(guildId, idOrName)
+  let p = await pollsRepo.getPollByName(guildId, idOrName);
+  if (p) return p;
+  const code = guessSlotFromNameStrict(idOrName || '');
+  if (code) {
+    const canonical = canonicalPollNameForCode(code);
+    p = await pollsRepo.getPollByName(guildId, canonical);
+    if (p) return p;
+  }
+  return null;
 }
 
 function pollEmbed(poll, items) {
@@ -475,6 +484,35 @@ async function upsertPollMessage(channel, poll, { withCounts = true } = {}) {
 
 
 // ---- Results helpers  ----
+
+function guessSlotFromNameStrict(pollName) {
+  const k = expandedNameKey(pollName);
+  const words = new Set(k.split(' ').filter(Boolean));
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const hasWholePhrase = (phrase) => {
+    const c = expandedNameKey(phrase);
+    if (k === c) return true;                         // exact
+    const re = new RegExp(`\\b${esc(c)}\\b`);         // whole-phrase
+    return re.test(k);
+  };
+  // Prefer canonical labels
+  for (const [code, canon] of SLOT_LABEL_KEYS) {
+    if (hasWholePhrase(canon)) return normalizeSlotCode(code);
+  }
+  // Then aliases; single words must match as whole words
+  for (const [code, arr] of Object.entries(SLOT_ALIASES)) {
+    for (const phrase of arr) {
+      const c = expandedNameKey(phrase);
+      if (c.includes(' ')) { if (hasWholePhrase(c)) return normalizeSlotCode(code); }
+      else { if (words.has(c)) return normalizeSlotCode(code); }
+    }
+  }
+  return null;
+}
+
+function canonicalPollNameForCode(code) {
+  return SLOT_LABELS[code] || code;
+}
 
 function mentionOrText(id, name) {
   return id === 'no_award' ? (name || 'No award') : `<@${id}>`
@@ -738,6 +776,274 @@ async function buildResultsEmbed(poll, { includeVoters = false, voterLimit = 10,
 
 // --- Admin helpers ---
 
+function pollIdFromMessage(m) {
+  try {
+    const t = m.embeds?.[0]?.footer?.text || '';
+    const m1 = t.match(/Poll ID:\s*(\d+)/i);
+    return m1 ? m1[1] : null;
+  } catch { return null; }
+}
+
+async function repairPollChannel(channel, { hard = false } = {}) {
+  if (!channel?.isTextBased?.()) return { scanned: 0, deleted: 0, upserted: 0 };
+
+  const polls = await pollsRepo.listPolls(channel.guild.id);
+  const live = new Map(polls.map(p => [String(p.id), p]));
+  const keepLatest = new Map(); // pollId -> message
+  const toDelete = [];
+
+  let scanned = 0;
+  let before;
+  // Page through recent history; deepen if you have a very busy channel
+  for (let i = 0; i < 25; i++) { // ~25 * 100 = 2500 msgs
+    const msgs = await channel.messages.fetch({ limit: 100, before }).catch(() => null);
+    if (!msgs?.size) break;
+    for (const [, m] of msgs) {
+      scanned++;
+      if (m.author.id !== channel.client.user.id) continue;
+      const pid = pollIdFromMessage(m);
+      if (!pid) { if (hard) toDelete.push(m); continue; }
+
+      if (!live.has(pid)) { toDelete.push(m); continue; }     // orphaned (poll deleted)
+      if (keepLatest.has(pid)) { toDelete.push(m); continue; } // duplicate
+      keepLatest.set(pid, m); // first seen is newest due to fetch order
+    }
+    before = msgs.last()?.id;
+    if (!before) break;
+  }
+
+  // Hard mode: delete all bot poll messages, then we will re-post from scratch
+  if (hard) {
+    for (const [, m] of keepLatest) toDelete.push(m);
+  }
+
+  let deleted = 0;
+  for (const m of toDelete) { await m.delete().catch(()=>null); deleted++; }
+
+  // Re-post (or upsert) one message per poll from Sheets
+  let upserted = 0;
+  for (const p of polls) {
+    await upsertPollMessage(channel, p);
+    upserted++;
+    await sleep(100);
+  }
+
+  return { scanned, deleted, upserted };
+}
+
+
+async function findPollBySlotCode(guildId, slotCode) {
+  const polls = await pollsRepo.listPolls(guildId);
+  return polls.find(p => guessSlotFromNameStrict(p.name) === slotCode) || null;
+}
+
+function itemKeyForMerge(it) {
+  return `${(it.name_lc || it.name || '').toLowerCase().trim()}|${(it.category || '').toLowerCase()}|${normalizeSlotCode(it.slot || '')}`;
+}
+
+async function renamePoll(pollId, newName) {
+  const { header, rows } = await readSheet(SHEET_POLLS);
+  const m = idxMap(header);
+  let changed = false;
+  for (const r of rows) {
+    if (parseInt(r[m.get('id')],10) === Number(pollId)) {
+      if (r[m.get('name')] !== newName) { r[m.get('name')] = newName; changed = true; }
+      break;
+    }
+  }
+  if (changed) await overwriteRows(SHEET_POLLS, header, rows);
+}
+
+// Merge all duplicate polls for a slot code into target; moves items+votes, then deletes sources
+async function mergeSlotPollGroup({ guildId, code, target, sources }) {
+  const canonicalName = canonicalPollNameForCode(code);
+
+  for (const src of sources) {
+    // Build mapping oldItemId -> newItemId
+    const targetItems = await itemsRepo.getItems(target.id);
+    const tMap = new Map(targetItems.map(i => [itemKeyForMerge(i), i]));
+    const srcItems = await itemsRepo.getItems(src.id);
+
+    const toCreate = [];
+    const idMap = new Map(); // oldItemId -> newItemId
+
+    for (const it of srcItems) {
+      const key = itemKeyForMerge(it);
+      const found = tMap.get(key);
+      if (found) idMap.set(it.id, found.id);
+      else toCreate.push({ key, it });
+    }
+
+    // Create missing items in target
+    for (const { it } of toCreate) {
+      await itemsRepo.upsertItem(target.id, it.name, it.category, it.slot || '');
+    }
+    if (toCreate.length) {
+      const fresh = await itemsRepo.getItems(target.id);
+      const fMap = new Map(fresh.map(i => [itemKeyForMerge(i), i]));
+      for (const { key, it } of toCreate) {
+        const created = fMap.get(key);
+        if (created) idMap.set(it.id, created.id);
+      }
+    }
+
+    // Move votes: src.poll_id -> target.id, item_id remapped via idMap
+    const votes = await readSheet(SHEET_VOTES);
+    const vm = idxMap(votes.header);
+    let changed = false;
+    for (const r of votes.rows) {
+      if (parseInt(r[vm.get('poll_id')],10) !== Number(src.id)) continue;
+      const oldItemId = parseInt(r[vm.get('item_id')],10);
+      const newItemId = idMap.get(oldItemId);
+      if (!newItemId) continue; // safety: should not happen
+      r[vm.get('poll_id')] = String(target.id);
+      r[vm.get('item_id')] = String(newItemId);
+      changed = true;
+    }
+    if (changed) await overwriteRows(SHEET_VOTES, votes.header, votes.rows);
+
+    // Remove the old poll + its items (votes we just moved will not match the src anymore)
+    await wipePoll(src.id);
+  }
+
+  // Ensure target is named canonically
+  if (expandedNameKey(target.name) !== expandedNameKey(canonicalName)) {
+    await renamePoll(target.id, canonicalName);
+  }
+
+  // Re-render target's message
+  const g = client.guilds.cache.get(guildId);
+  const chan = g ? (getPollChannel(g) || g.systemChannel) : null;
+  if (chan) {
+    const latest = await pollsRepo.getPollById(target.id);
+    await upsertPollMessage(chan, latest || target);
+  }
+}
+
+// Plan or apply merges for the whole guild; returns a human summary
+async function normalizeSlotPolls(guildId, { dryRun = true } = {}) {
+  const polls = await pollsRepo.listPolls(guildId);
+
+  // Group polls by slot code (strict)
+  const buckets = new Map(); // code -> polls[]
+  for (const p of polls) {
+    const code = guessSlotFromNameStrict(p.name);
+    if (!code) continue;
+    if (!buckets.has(code)) buckets.set(code, []);
+    buckets.get(code).push(p);
+  }
+
+  const plans = [];
+  for (const [code, arr] of buckets) {
+    const canonicalName = canonicalPollNameForCode(code);
+    // pick canonical/open/first as the keeper
+    let target =
+      arr.find(p => expandedNameKey(p.name) === expandedNameKey(canonicalName)) ||
+      arr.find(p => p.is_open) ||
+      arr[0];
+
+    const sources = arr.filter(p => p.id !== target.id);
+    const needsRename = expandedNameKey(target.name) !== expandedNameKey(canonicalName);
+
+    if (sources.length || needsRename) {
+      plans.push({ code, canonicalName, target, sources, needsRename });
+    }
+  }
+
+  if (!plans.length) {
+    return { text: 'No duplicate slot polls found. Everything is already canonical.' };
+  }
+
+  // Dry run summary
+  if (dryRun) {
+    const lines = [];
+    for (const p of plans) {
+      const keep = `keep **${p.canonicalName}** → ID ${p.target.id}${p.needsRename ? ' (will rename)' : ''}`;
+      const merge = p.sources.length ? ` ; merge ${p.sources.map(s => `**${s.name}**(ID ${s.id})`).join(', ')}` : '';
+      lines.push(`• ${keep}${merge}`);
+    }
+    return { text: ['Planned merges:', ...lines].join('\n') };
+  }
+
+  // Apply each plan
+  let mergedCount = 0;
+  for (const p of plans) {
+    await mergeSlotPollGroup({ guildId, code: p.code, target: p.target, sources: p.sources });
+    mergedCount += p.sources.length;
+  }
+  return { text: `Merged ${mergedCount} duplicate slot poll(s) and normalized names.` };
+}
+
+
+async function audit({ guild_id, action, actor, poll, details = '' }) {
+  try {
+    await appendRows(SHEET_AUDIT, [[
+      String(Date.now()),
+      guild_id || '',
+      action || '',
+      actor?.id || '',
+      actor?.name || '',
+      poll?.id != null ? String(poll.id) : '',
+      poll?.name || '',
+      typeof details === 'string' ? details : JSON.stringify(details || {})
+    ]])
+  } catch (e) {
+    console.warn('[audit] failed:', e?.message || e)
+  }
+}
+
+
+function expandedNameKey(s) {
+  return (s || '')
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/\u00a0/g, ' ')         // nbsp -> space
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')     // collapse punctuation
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+const SLOT_LABEL_KEYS = new Map(
+  Object.entries(SLOT_LABELS).map(([code, label]) => [code, expandedNameKey(label)])
+)
+
+const SLOT_ALIASES = {
+  xb:  ['xb', 'xbow', 'x bow', 'x-bow', 'crossbow'],
+  sns: ['sns', 'sword and shield', 'sword shield', 'sword & shield'],
+  gs:  ['gs', 'greatsword'],
+  lb:  ['lb', 'longbow'],
+  orb: ['orb'],
+  wand:['wand'],
+  staff:['staff'],
+  spear:['spear'],
+  dagger:['dagger', 'daggers'],
+  helmet:['helmet','helm','head'],
+  cloak: ['cloak','cape'],
+  chest: ['chest', 'chests', 'chestplate','armor'],
+  gloves:['gloves', 'hands'],
+  pants: ['pants','legs','leggings'],
+  boots: ['boot', 'boots'],
+  ring:  ['ring', 'rings'],
+  neck:  ['neck','necklace','amulet'],
+  earring:['earring','earrings'],
+  bracelet:['bracelet'],
+  belt:  ['belt'],
+}
+
+function guessSlotFromName(pollName) {
+  const k = expandedNameKey(pollName)
+  for (const [code, canon] of SLOT_LABEL_KEYS) {
+    if (k === canon || k.includes(canon)) return normalizeSlotCode(code)
+  }
+  for (const [code, arr] of Object.entries(SLOT_ALIASES)) {
+    for (const phrase of arr) {
+      if (k.includes(expandedNameKey(phrase))) return normalizeSlotCode(code)
+    }
+  }
+  return null
+}
+
 function nameKey(s) {
   return (s || '')
     .toLowerCase()
@@ -747,12 +1053,12 @@ function nameKey(s) {
     .trim()
 }
 
-async function summarizeUserVotes(guildId, userId, { includeClosed = false } = {}) {
+ async function summarizeUserVotes(guildId, userId, { includeClosed = false } = {}) {
   // Read guild polls once
   const polls = await pollsRepo.listPolls(guildId);
   const pollsById = new Map(polls.map(p => [Number(p.id), p]));
 
-  // Read the user's vote rows
+  // Read the user's vote rows and keep only polls we care about (open by default)
   const votesSheet = await readSheet(SHEET_VOTES);
   const vm = idxMap(votesSheet.header);
   const rows = votesSheet.rows.filter(r => {
@@ -780,8 +1086,9 @@ async function summarizeUserVotes(guildId, userId, { includeClosed = false } = {
     }
   ]));
 
-  // Group by poll, aggregate modes per item
-  const perPoll = new Map(); // poll_id -> Map<item_id, Set<modes>>
+  // Group by poll, then aggregate modes per item
+  // perPoll: Map<poll_id, Map<item_id, Set<modes>>>
+  const perPoll = new Map();
   for (const r of rows) {
     const pid = parseInt(r[vm.get('poll_id')], 10);
     const iid = parseInt(r[vm.get('item_id')], 10);
@@ -794,34 +1101,73 @@ async function summarizeUserVotes(guildId, userId, { includeClosed = false } = {
     perItem.get(iid).add(mode);
   }
 
-  // Build output
+  if (perPoll.size === 0) return { text: null };
+
+  // --- Build output (group by Category; lines show "Item (Slot) — Mode") ---
   const lines = [];
   const sortedPolls = Array.from(perPoll.keys())
-    .sort((a,b) => (pollsById.get(a)?.name || '').localeCompare(pollsById.get(b)?.name || ''));
+    .sort((a, b) => (pollsById.get(a)?.name || '').localeCompare(pollsById.get(b)?.name || ''));
 
   for (const pid of sortedPolls) {
     const poll = pollsById.get(pid);
     const itemsMap = perPoll.get(pid);
 
-    const itemLines = [];
-    for (const [iid, modeSet] of Array.from(itemsMap.entries()).sort((a,b) => {
-      const ai = itemById.get(a[0]); const bi = itemById.get(b[0]);
-      return (ai?.category||'').localeCompare(bi?.category||'') || (ai?.name||'').localeCompare(bi?.name||'');
-    })) {
+    // Prepare category buckets in a stable order
+    const byCat = new Map(CATS.map(c => [c, []]));
+
+    // Sort items by category then item name for stable listing
+    const sortedItems = Array.from(itemsMap.entries()).sort((a, b) => {
+      const ai = itemById.get(a[0]) || {};
+      const bi = itemById.get(b[0]) || {};
+      return (ai.category || '').localeCompare(bi.category || '') ||
+             (ai.name || '').localeCompare(bi.name || '');
+    });
+
+    // Collect entries into their category bucket
+    for (const [iid, modeSet] of sortedItems) {
       const it = itemById.get(iid);
-      const slot = it.slot ? ` (${it.slot})` : '';
-      const modes = Array.from(modeSet).filter(Boolean).map(labelModeLong);
-      const modeStr = modes.length ? ` — ${modes.join(', ')}` : '';
-      itemLines.push(`• ${labelCat(it.category)} • ${it.name}${slot}${modeStr}`);
+      if (!it) continue;
+
+      const slotCode  = normalizeSlotCode(it.slot || '');
+      const slotLabel = slotCode ? ` (${labelSlot(slotCode)})` : '';
+
+      // Render modes in fixed order; include 'Unknown' if present
+      const present = new Set(modeSet);
+      const orderedModes = MODES.filter(m => present.has(m)).map(labelModeLong);
+      if (present.has('unknown')) orderedModes.push('Unknown');
+      const modeStr = orderedModes.length ? ` — ${orderedModes.join(', ')}` : '';
+
+      const line = `• ${it.name}${slotLabel}${modeStr}`;
+      const group = byCat.get(it.category);
+      if (group) group.push(line);
+      else {
+        // Non-standard category safety net
+        if (!byCat.has('other')) byCat.set('other', []);
+        byCat.get('other').push(line);
+      }
     }
 
-    lines.push(`**${poll.name}${poll.is_open ? '' : ' (closed)'}**\n${itemLines.join('\n')}`);
+    // Emit category blocks that have items
+    const blocks = [];
+    for (const cat of CATS) {
+      const group = byCat.get(cat) || [];
+      if (!group.length) continue;
+      blocks.push(`__${labelCat(cat)}__\n${group.join('\n')}`);
+    }
+    if (byCat.has('other') && byCat.get('other').length) {
+      blocks.push(`__Other__\n${byCat.get('other').join('\n')}`);
+    }
+
+    lines.push(`**${poll.name}${poll.is_open ? '' : ' (closed)'}**\n${blocks.join('\n\n')}`);
   }
 
-  const uniqueCount = Array.from(perPoll.values()).reduce((sum, map) => sum + map.size, 0)
-  const header = `Your votes (open polls only) — **${uniqueCount}** total:`
+  // Unique item count across all (open) polls
+  const uniqueCount = Array.from(perPoll.values()).reduce((sum, map) => sum + map.size, 0);
+  const header = `Your votes (open polls only) — **${uniqueCount}** total:`;
   return { text: [header, '', ...lines].join('\n') };
 }
+
+
 
 async function handleUserVotes(inter) {
   try { await inter.deferReply({ ephemeral: true }) } catch {}
@@ -936,13 +1282,26 @@ const commands = [
       .setDescription('Post a results embed for a poll')
       .addStringOption(o => o.setName('poll').setDescription('Poll ID or name').setRequired(true))
     .addChannelOption(o => o
-    .setName('channel')
-    .setDescription('Channel to post results (optional)')
-    .addChannelTypes(ChannelType.GuildText)
-  )
-  .addBooleanOption(o => o.setName('voters').setDescription('Include voter names per item (default: off)'))
-  .addBooleanOption(o => o.setName('hide_zero').setDescription('Hide items with zero votes (default: show)'))
-  )
+      .setName('channel')
+      .setDescription('Channel to post results (optional)')
+      .addChannelTypes(ChannelType.GuildText)
+    )
+    .addBooleanOption(o => o.setName('voters').setDescription('Include voter names per item (default: off)'))
+    .addBooleanOption(o => o.setName('hide_zero').setDescription('Hide items with zero votes (default: show)'))
+    )
+    .addSubcommand(sc => sc
+    .setName('repair_channel')
+    .setDescription('Remove orphan/duplicate poll messages and re-post one per poll')
+    .addBooleanOption(o => o
+      .setName('hard')
+      .setDescription('Delete all bot poll messages first (default: false)')))
+    .addSubcommand(sc => sc
+    .setName('normalize_slots')
+    .setDescription('Merge duplicate slot-named polls into one canonical poll per slot')
+    .addBooleanOption(o => o
+      .setName('apply')
+      .setDescription('Apply changes (default: dry run)')))
+
     .addSubcommand(sc=> sc.setName('create').setDescription('Create a new poll')
       .addStringOption(o=>o.setName('name').setDescription('Poll name').setRequired(true))
       .addStringOption(o=>o.setName('type').setDescription('Boss type').addChoices(
@@ -1233,6 +1592,9 @@ async function handleCouncil(inter) {
       channel_id: postChannel.id,
       created_by: inter.user.id
     })
+
+    await audit({ guild_id: inter.guildId, action: 'poll_create', actor: { id: inter.user.id, name: niceName(inter) }, poll })
+
     // Persist candidates
     for (const c of candidates) {
       await addCouncilCandidate(poll.id, c.id, c.name || '')
@@ -1383,11 +1745,22 @@ async function handlePoll(inter) {
   if (!guildId) return inter.reply({ content: 'Guild-only command.', flags: MessageFlags.Ephemeral })
 
   if (sub === 'create') {
-  const name = inter.options.getString('name', true).trim()
+  let name = inter.options.getString('name', true).trim()
   const type = inter.options.getString('type', true)
   const expiresHours = inter.options.getInteger('expires_hours')
   if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create polls.', flags: MessageFlags.Ephemeral })
   if (!TYPES.includes(type)) return inter.reply({ content: 'Invalid type.', flags: MessageFlags.Ephemeral })
+
+  // If the provided name *looks like* a slot, enforce canonical name and prevent dupes
+  const codeMaybe = guessSlotFromNameStrict(name);
+  if (codeMaybe) {
+    const canonical = canonicalPollNameForCode(codeMaybe);
+    const existingCanonical = await pollsRepo.getPollByName(guildId, canonical);
+    if (existingCanonical) {
+      return inter.reply({ content: `Slot poll **${canonical}** already exists (ID ${existingCanonical.id}). Use /poll repost or /poll sync_slot.`, flags: MessageFlags.Ephemeral });
+    }
+    name = canonical; // normalize
+  }
 
   let expires = null
   if (expiresHours && expiresHours > 0) expires = Date.now() + (expiresHours * 3600 * 1000)
@@ -1399,6 +1772,8 @@ async function handlePoll(inter) {
   const poll = await pollsRepo.createPoll({ guild_id: guildId, name, expires_at: expires, type, mode: 'all' })
   await inter.reply({ content: `Created poll **${poll.name}** (ID ${poll.id}).`, flags: MessageFlags.Ephemeral })
   await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll)
+
+  await audit({ guild_id: inter.guildId, action: 'poll_create', actor: { id: inter.user.id, name: niceName(inter) }, poll })
 
   } else if (sub === 'repost') {
     const idOrName = inter.options.getString('poll', true)
@@ -1425,7 +1800,38 @@ async function handlePoll(inter) {
     }
 
     return inter.editReply({ content: `Refreshed **${updated}** poll message(s).` })
-  } else if (sub === 'add') {
+  } else if (sub === 'repair_channel') {
+    if (!isAdmin(inter.member)) {
+      return inter.reply({ content: 'Admin only.', flags: MessageFlags.Ephemeral });
+    }
+    try { await inter.deferReply({ ephemeral: true }) } catch {}
+
+    const hard = inter.options.getBoolean('hard') || false;
+    const guild = inter.guild;
+    const chan = getPollChannel(guild) || inter.channel;
+
+    const stats = await repairPollChannel(chan, { hard });
+    return inter.editReply({
+      content: `Channel repaired. Scanned ${stats.scanned} msgs, deleted ${stats.deleted}, upserted ${stats.upserted}.`
+    });
+  } else if (sub === 'normalize_slots') {
+      if (!isAdmin(inter.member)) {
+        return inter.reply({ content: 'Only admins can normalize.', flags: MessageFlags.Ephemeral });
+      }
+      try { await inter.deferReply({ flags: MessageFlags.Ephemeral }) } catch {}
+      const apply = inter.options.getBoolean('apply') || false;
+      const { text } = await normalizeSlotPolls(inter.guildId, { dryRun: !apply });
+
+      if (text.length > 1900) {
+        const buf = Buffer.from(text, 'utf8');
+        return inter.editReply({
+          content: apply ? 'Normalization completed. Summary attached.' : 'Dry-run summary attached.',
+          files: [{ attachment: buf, name: `normalize-slots-${apply?'applied':'plan'}.txt` }],
+        });
+      }
+      return inter.editReply({ content: text });
+
+    } else if (sub === 'add') {
     const idOrName = inter.options.getString('poll', true)
     const itemName = inter.options.getString('item', true).trim()
     const category = inter.options.getString('category', true)
@@ -1447,7 +1853,11 @@ async function handlePoll(inter) {
     if (!isAdmin(inter.member)) return inter.reply({ content: 'Only admins can create presets.', flags: MessageFlags.Ephemeral })
     const boss = inter.options.getString('boss', true)
     const type = inter.options.getString('type', true)
-    const nameOverride = inter.options.getString('name')
+    let nameOverride = inter.options.getString('name')
+    if (nameOverride) {
+      const code = guessSlotFromNameStrict(nameOverride);
+      if (code) nameOverride = canonicalPollNameForCode(code);
+    }
     const expiresHours = inter.options.getInteger('expires_hours')
 
     if (!TYPES.includes(type)) return inter.reply({ content: 'Invalid type.', flags: MessageFlags.Ephemeral })
@@ -1539,6 +1949,9 @@ async function handlePoll(inter) {
 
     await inter.reply({ content: `Created **${poll.name}** with ${uniq.length} item(s) for slot **${labelSlot(slot)}**.`, flags: MessageFlags.Ephemeral });
     await upsertPollMessage(getPollChannel(inter.guild) || inter.channel, poll);
+
+    await audit({ guild_id: inter.guildId, action: 'poll_create', actor: { id: inter.user.id, name: niceName(inter) }, poll })
+
   }
 
   else if (sub === 'close') {
@@ -1557,10 +1970,11 @@ else if (sub === 'sync_slot') {
     return inter.reply({ content: 'Only admins can sync from Presets.', flags: MessageFlags.Ephemeral });
   }
   try { await inter.deferReply({ ephemeral: true }) } catch {}
-
-  const slot = (inter.options.getString('slot', true) || '').toLowerCase();
+ 
+  const slotRaw = (inter.options.getString('slot', true) || '').toLowerCase();
+  const slot = normalizeSlotCode((inter.options.getString('slot', true) || '').toLowerCase());
   const createIfMissing = inter.options.getBoolean('create_if_missing') || false;
-  const pollName = labelSlot(slot);                 // e.g. 'Helmet', 'Ring', 'Crossbow'
+  const pollName = labelSlot(slot);                 // now canonical for the code
   const slotKey = normalizeSlotCode(slot);          // e.g. 'helmet', 'ring', 'xb'
 
   // Load Presets for this slot
@@ -1573,7 +1987,7 @@ else if (sub === 'sync_slot') {
   );
 
   // Find (or create) the slot poll
-  let poll = await pollsRepo.getPollByName(inter.guildId, pollName);
+  let poll = await pollsRepo.getPollByName(inter.guildId, pollName) || await findPollBySlotCode(inter.guildId, slot);
   if (!poll) {
     if (!createIfMissing) {
       return inter.editReply({ content: `Poll **${pollName}** does not exist. Create it with /poll slot or set create_if_missing:true.` });
@@ -1610,10 +2024,7 @@ else if (sub === 'sync_slot') {
       ? `Synced **${poll.name}** — added **${added}** new item(s) from Presets.`
       : `Synced **${poll.name}** — no new items found (already up to date).`
   });
-}
-
-  // /poll sync_all_slots
-  else if (sub === 'sync_all_slots') {
+  } else if (sub === 'sync_all_slots') {
     if (!isAdmin(inter.member)) {
       return inter.reply({ content: 'Only admins can sync from Presets.', flags: MessageFlags.Ephemeral });
     }
@@ -1624,7 +2035,18 @@ else if (sub === 'sync_slot') {
 
     // Read existing polls once
     const existing = await pollsRepo.listPolls(inter.guildId);
-    const byName = new Map(existing.map(p => [nameKey(p.name), p]))
+    const byName = new Map(existing.map(p => [expandedNameKey(p.name), p]));
+
+    // Build a second index by inferred slot code (prefer open polls)
+    const bySlotExisting = new Map();
+    for (const p of existing) {
+      const code = guessSlotFromNameStrict(p.name);
+      if (!code) continue;
+      const prev = bySlotExisting.get(code);
+      if (!prev || (!prev.is_open && p.is_open)) {
+        bySlotExisting.set(code, p);
+      }
+    }
 
     // Read Presets once and bucket by normalized slot
     const presetSheet = await readSheet(SHEET_PRESETS);
@@ -1646,22 +2068,44 @@ else if (sub === 'sync_slot') {
     const skipped = [];
     const noPreset = [];
 
+    // Iterate every supported slot
     for (const rawSlot of SLOTS) {
-      const slotKey = normalizeSlotCode(rawSlot);     // normalized for Presets
-      const pollName = labelSlot(rawSlot);           // human label for the poll name
+      const slotKey = normalizeSlotCode(rawSlot); // e.g. 'xb' | 'helmet' | ...
+      const pollName = labelSlot(rawSlot);        // e.g. 'Crossbow' | 'Helmet'
       const rows = bySlot.get(slotKey) || [];
-      if (!rows.length) { noPreset.push(pollName); continue; }
 
-      let poll = byName.get(nameKey(pollName))
+      if (!rows.length) { 
+        noPreset.push(pollName);
+        continue;
+      }
+
+      // Use exact-name match first, otherwise the slot-inferred one
+      let poll = byName.get(expandedNameKey(pollName)) || bySlotExisting.get(slotKey);
+
       if (!poll) {
-        if (!createIfMissing) { skipped.push(`${pollName} (missing)`); continue; }
+        if (!createIfMissing) { 
+          skipped.push(`${pollName} (missing)`); 
+          continue; 
+        }
         poll = await pollsRepo.createPoll({
           guild_id: inter.guildId, name: pollName, expires_at: null, type: 'mixed', mode: 'all'
         });
-        byName.set(pollName.toLowerCase(), poll);
+        byName.set(expandedNameKey(pollName), poll);
+        bySlotExisting.set(slotKey, poll);
         created.push(pollName);
+
+        await audit({
+          guild_id: inter.guildId,
+          action: 'poll_create',
+          actor: { id: inter.user.id, name: niceName(inter) },
+          poll
+        });
       }
-      if (!poll.is_open) { skipped.push(`${pollName} (closed)`); continue; }
+
+      if (!poll.is_open) { 
+        skipped.push(`${pollName} (closed)`); 
+        continue; 
+      }
 
       const uniq = uniqueByKey(rows, r =>
         `${(r.item || '').toLowerCase()}|${(r.category || '').toLowerCase()}|${normalizeSlotCode(r.slot || '')}`
@@ -1687,6 +2131,7 @@ else if (sub === 'sync_slot') {
       } else {
         skipped.push(`${pollName} (no change)`);
       }
+
       await sleep(125); // gentle on Sheets/Discord
     }
 
@@ -1699,24 +2144,25 @@ else if (sub === 'sync_slot') {
     return inter.editReply({
       content: parts.length ? parts.join('\n') : 'Nothing to sync.'
     });
-  }
-  else if (sub === 'auto_slots') {
+  } else if (sub === 'auto_slots') {
     if (!isAdmin(inter.member)) {
        return inter.reply({ content: 'Only admins can create polls.', flags: MessageFlags.Ephemeral });
      }
-     try { await inter.deferReply({ flags: MessageFlags.Ephemeral }) } catch {}
+     try { await inter.deferReply({ ephemeral: true }) } catch {}
  
      const expiresHours = inter.options.getInteger('expires_hours');
      const expires = (expiresHours && expiresHours > 0)
        ? Date.now() + (expiresHours * 3600 * 1000)
        : null;
  
-     const chan = getPollChannel(inter.guild) || inter.channel;
- 
-     // Read existing polls once
-     const existing = await pollsRepo.listPolls(guildId);
-     const existingByName = new Set(existing.map(p => (p.name || '').trim().toLowerCase()));
- 
+      const chan = getPollChannel(inter.guild) || inter.channel;
+      const existing = await pollsRepo.listPolls(guildId);
+      const byNameKey = new Set(existing.map(p => expandedNameKey(p.name)));
+      const bySlotExisting = new Map();
+      for (const p of existing) {
+        const code = guessSlotFromNameStrict(p.name);
+        if (code && !bySlotExisting.has(code)) bySlotExisting.set(code, p);
+      }
      // Read Presets once and bucket by normalized slot
      const presetSheet = await readSheet(SHEET_PRESETS);
      const pm = idxMap(presetSheet.header);
@@ -1744,14 +2190,13 @@ else if (sub === 'sync_slot') {
      const noPreset = [];
      const errors = [];
  
-     for (const slot of SLOTS) {
-       const pollName = labelSlot(slot);
-       const pollNameKey = pollName.trim().toLowerCase();
- 
-       if (existingByName.has(pollNameKey)) {
-         skipped.push(pollName);
-         continue;
-       }
+      for (const raw of SLOTS) {
+        const code = normalizeSlotCode(raw);
+        const pollName = labelSlot(code);
+        if (byNameKey.has(expandedNameKey(pollName)) || bySlotExisting.has(code)) {
+          skipped.push(pollName);
+          continue;
+        }
        const rows = bySlot.get(slot) || [];
        if (!rows.length) {
          noPreset.push(pollName);
@@ -1765,6 +2210,8 @@ else if (sub === 'sync_slot') {
          const poll = await pollsRepo.createPoll({
            guild_id: guildId, name: pollName, expires_at: expires, type: 'mixed', mode: 'all'
          });
+         byNameKey.add(expandedNameKey(pollName));
+         bySlotExisting.set(code, poll);
          // Add items (itemsRepo handles IDs; we only guard category)
          for (const r of uniq) {
            if (!CATS.includes(r.category)) continue;
@@ -1793,6 +2240,7 @@ else if (sub === 'sync_slot') {
          ? parts.join('\n')
          : 'Nothing to do — all slot polls already exist or have no presets.',
      });
+
   }
 
 }
@@ -1909,7 +2357,7 @@ async function handleVoteButton(inter) {
 }
 
 async function handleVoteModeAdd(inter) {
-  try { await inter.deferReply({ flags: MessageFlags.Ephemeral }) } catch {}
+  try { await inter.deferReply({ ephemeral: true }) } catch {}
   const [, pollIdStr, itemIdStr, mode] = inter.customId.split(':') // vote-mode-add:<pollId>:<itemId>:<mode>
   const pollId = Number(pollIdStr)
   const itemId = Number(itemIdStr)
@@ -2289,6 +2737,14 @@ async function handleAdminDeleteConfirm(inter) {
   const poll = await pollsRepo.getPollById(pollId)
   if (!poll) return inter.update({ content:'Poll not found (it may already be deleted).', components:[], embeds:[] })
   try { await inter.deferUpdate() } catch {}
+
+  await audit({
+    guild_id: inter.guildId,
+    action: 'poll_delete',
+    actor: { id: inter.user.id, name: niceName(inter) },
+    poll,
+    details: { reason: 'admin:deleteconfirm' }
+  })
 
   // 1) Wipe data from sheets
   await wipePoll(poll.id)

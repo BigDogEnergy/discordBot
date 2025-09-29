@@ -33,7 +33,15 @@ process.on('warning', (warning) => {
 const DISCORD_USER_ID = process.env.DISCORD_USER_ID
 const TOKEN = process.env.DISCORD_BOT_TOKEN
 const CLIENT_ID = process.env.CLIENT_ID || process.env.DISCORD_CLIENT_ID
-const ADMIN_ROLE_NAME = process.env.LOOT_ADMIN_ROLE || 'Loot Admin' || process.env.LOOT_ADMIN_ROLE_TEMP || process.env.LOOT_ADMIN_ROLE_TEMP2
+const ADMIN_ROLE_NAMES = (
+  process.env.LOOT_ADMIN_ROLES         // comma separated list (preferred)
+  || process.env.LOOT_ADMIN_ROLE
+  || process.env.LOOT_ADMIN_ROLE_TEMP
+  || process.env.LOOT_ADMIN_ROLE_TEMP2
+  || 'Loot Admin'
+).split(',')
+ .map(s => s.trim())
+ .filter(Boolean)
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL
 const POLL_CHANNEL_ID   = process.env.MAIN_LOOT_POLL_CHANNEL_ID || ''
@@ -378,10 +386,11 @@ function niceName(inter) {
 
 function isAdmin(member) {
   if (!member) return false
+  if (member.permissions?.has(PermissionFlagsBits.Administrator)) return true
   if (member.permissions?.has(PermissionFlagsBits.ManageGuild)) return true
   if (member.id === member.guild?.ownerId) return true
   if (member.id === DISCORD_USER_ID) return true
-  return member.roles?.cache?.some(r => r.name === ADMIN_ROLE_NAME)
+  return member.roles?.cache?.some(r => ADMIN_ROLE_NAMES.includes(r.name))
 }
 
 async function resolvePoll(guildId, idOrName) {
@@ -1453,8 +1462,8 @@ const commands = [
 ].map(c => c.toJSON())
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers],
-  partials: [Partials.Channel],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers, GatewayIntentBits.MessageContent],
+  partials: [Partials.Channel, Partials.Message],
 })
 
 // --- Discord client guards ---
